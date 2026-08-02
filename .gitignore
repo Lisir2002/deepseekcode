@@ -1,0 +1,47 @@
+# Gradle
+.gradle/
+build/
+**/build/
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+local.properties
+captures/
+
+# IntelliJ / Android Studio
+*.iml
+.idea/
+*.iws
+*.ipr
+.externalNativeBuild/
+.cxx/
+.caches/
+
+# Kotlin
+*.hprof
+
+# Room schemas (optional, keep if want versioned)
+# app/schemas/
+
+# APK / AAB
+*.apk
+*.aab
+*.ap_
+*.idsig
+# 例外：release 目录永远保持不忽略（用于发布成品 APK + SHA）
+!releases/**
+
+# Keystore
+*.keystore
+*.jks
+*.p12
+signing.properties
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logcat.txt
+nohup.out
+/tmp/
