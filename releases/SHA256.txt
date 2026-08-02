@@ -1,0 +1,2 @@
+df12c04b235f169a3176fea60abdbd1a243acebbf434ce6a4c5c3e6eea4d4ae2  DeepCoder-v1.0.0-debug.apk
+371e6a882cb141b5169d985d31686eea0cc69c9d92b1dce8ead80339c289965a  DeepCoder-v1.0.0-release-unsigned.apk
