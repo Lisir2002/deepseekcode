@@ -132,7 +132,8 @@ fun main(args: Array<String>) {
     }
 
     loraFile.close(); planFile.close(); promptFile.close()
-    // qualityReport 是 StringBuilder 不是 Writer，不需要 close
+    // qualityReport 是 StringBuilder，写出到 CSV 文件
+    File(opts.outDir, "quality-report.csv").writeText(qualityReport.toString())
 
     // ---------- Step 4: Meta 报告 ----------
     val scopeBuckets = pairs.groupingBy { it.second.meta.scopeTag }.eachCount()

@@ -666,8 +666,8 @@ DeepCoder-Planner-diagnostic-20260802-153042.zip
 | **P4-S0** | 全量清理环境（停 Gradle Daemon / 删锁文件） | ✅ DONE | 环境干净，无残留进程 |
 | **P4-S1A** | `gradle.properties` 回滚 + 打开增量编译 | ✅ DONE | `kotlin.incremental=true` + `org.gradle.caching=true` + 删除冲突的 `kotlin.compiler.execution.strategy` 覆盖；堆 2048m + MaxMetaspace 512m + 单 worker |
 | **P4-S1B** | 编译验证：纯 JVM 子模块 `planner-benchmarks`（Gradle 配置验证 + Escape-Hatch 直编） | ✅ **DONE** | **关键产出：**<br>• 代码修复：GenerateLoraDataset.kt 7 处字段引用错误（`plan.meta.dispatch.scope`→`plan.meta.scopeTag`、移除不存在字段）、LiveF1BacktestAgainstDeepSeek.kt 2 处字段名错误<br>• `:planner-benchmarks:help` Gradle 配置阶段 BUILD SUCCESSFUL ✅（多模块 AGP + JVM 配置无误）<br>• Escape-Hatch：kotlin-compiler-embeddable.jar 直编 10 个 kt 文件 → EXIT=0，**89 .class 生成，0 错误 0 警告**（含 kotlinx-serialization + kotlinx-coroutines + okhttp3 全 33 依赖 jar）<br>• 增量验证：改 1 个 kt 文件 → 89 中仅 2 class 变化（2.2%），**87 class md5 完全相同** → Kotlin 编译确定性成立，后续 Gradle 增量编译缓存策略可直接套用 |
-| **P4-S2** | 合成 LoRA 小样本：`GenerateLoraDataset --n=2000` | ⏳ PENDING | 输入：P4-S1B 编译产物；输出：`datasets/lora-small/*.jsonl` + `qc_report.json`；验收：Q1~Q10 通过率 = 100% |
-| **P4-S3** | Dry-run F1 回测 | ⏳ PENDING | `LiveF1BacktestAgainstDeepSeek --n=50`（默认 dry-run，不耗 token）；输出：F1 CAP 分类准确率 / Scope 分类准确率 / 粒度区间命中率 |
+| **P4-S2** | 合成 LoRA 小样本：`GenerateLoraDataset --n=2000` | ✅ **DONE** | **关键产出（seed=42，耗时 1.431s）：**<br>• **Q1~Q10 通过率 = 2000/2000 = 100% ✅**<br>• 5 个产物齐全（~38.4MB）：<br>  - `lora-train.jsonl` 21MB（2000 条 DeepSeek LoRA 规范 messages 三元组）<br>  - `planner-outputs.jsonl` 18MB（2000 条 PlannerOutput 原始 JSON，用于离线回放）<br>  - `quality-report.csv` 94KB（含 header 2001 行）<br>  - `prompts-shuffled.txt` 134KB（便于人工抽查）<br>  - `lora-train-meta.json` 424B（样本分布 + Q1~Q10 统计）<br>• 分布命中：Scope(GENERAL=540 / ANDROID_KOTLIN=660 / WEB_FRONTEND=800 → WEB 40% 精准命中 web-ratio=0.4)<br>• Granularity(COARSE=387 / MEDIUM=1020 / FINE=593) → **粒度区间命中率 100%**<br>• **Contrastive 增强：73%（1460/2000）≥ 30% ✅**（scope_hint≥2 的多场景混合样本）<br>• Milestone durationPct sum=1.0（小数比例语义等价 100%）全通过；Subtask AC ≥15 中文字符 = 34724/34724 = 100%<br>• Escape-Hatch P4-S2-3A：Gradle caches 被清空 + Google Maven 被墙导致 AGP 插件下载 7m timeout → 直接 curl Maven Central 下载 9 个 runtime jars（8.4MB）+ 从 Gradle 8.14.4 lib 复制 stdlib/reflect/trove4j，绕开 Gradle 构建 |
+| **P4-S3** | Dry-run F1 回测 | 🚧 **NEXT UP** | `LiveF1BacktestAgainstDeepSeek --n=50`（默认 dry-run，不耗 token）；输出：F1 CAP 分类准确率 / Scope 分类准确率 / 粒度区间命中率；需调用 Escape-Hatch 同样的 9 jars classpath |
 | **P4-S4** | Git 同步（本步骤即执行此条） | ✅ DONE | 本次 commit = 规格文档 v0.7 + Phase 进度追踪 §11 新增 + P4-S1A 配置 + 10kt 评测集 + App 执行引擎 + 成品 APK |
 | **P4-S5** | Phase 4 最终报告 | ⏳ PENDING | 汇总 P4-S1B~S3 所有 BUILD LOG / QC REPORT / F1 SCORE，给出「是否进入 Step 3 全量合成」Go/No-Go 建议 |
 
@@ -693,6 +693,7 @@ DeepCoder-Planner-diagnostic-20260802-153042.zip
 
 | # | 事项 | 类型 | 建议 |
 |---|---|---|---|
-| 1 | P4-S1B Gradle 增量编译验证（本推送后已完成） | ✅ 已通过 | **验证结论：**10 kt 文件 0 错误 0 警告，89 .class 生成；增量改 1 kt → 仅 2 class 变（2.2%），87 class md5 相同 → Kotlin 编译确定性 ✅ |
-| 2 | 🚧 **NEXT UP** P4-S2 合成 2,000 条小样本是否立刻执行？ | 用户下令 | 建议 P4-S1B 已通过 → 立刻执行 `GenerateLoraDataset --n=2000`，约 5~10 分钟；验收：Q1~Q10 质检通过率 = 100% |
-| 3 | 商务 DeepSeek LoRA 渠道是否已开通？ | 外部依赖 | 影响 Phase 2 Step 4 放量训练；若未开通可先停在 Step 3 小样本验证 + F1 回测闭环 |
+| 1 | P4-S1B Gradle 增量编译验证 | ✅ 已通过 | 10 kt 文件 0 错误 0 警告，89 .class；增量改 1 kt → 仅 2 class 变（2.2%）→ 编译确定性 ✅ |
+| 2 | P4-S2 LoRA 小样本 2,000 条合成 | ✅ 已通过 | **8/8 验证项全过**：Q1~Q10=100%，WEB 分布=40% 精准命中，gran 区间=100%，Contrastive=73%，CSV 2001 行，产物 ~38.4MB |
+| 3 | 🚧 **NEXT UP** P4-S3 Dry-run F1 回测（默认 dry-run，不耗 token）| 用户下令 | `LiveF1BacktestAgainstDeepSeek --n=50`；输出 F1 CAP/Scope/Clarity 分类准确率 + 粒度区间命中率；用 P4-S2 Escape-Hatch 的 9 jars classpath |
+| 4 | 商务 DeepSeek LoRA 渠道是否已开通？ | 外部依赖 | 影响 Phase 2 Step 4 放量训练；若未开通可先停在 Step 3 小样本验证 + F1 回测闭环 |
