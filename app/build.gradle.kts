@@ -25,10 +25,12 @@ android {
             isMinifyEnabled = false
             isDebuggable = true
             applicationIdSuffix = ".debug"
+            // 用户指示 Phase 4 不放 release，用默认 Android debug keystore 即可
         }
         release {
             isMinifyEnabled = false
             isShrinkResources = false
+            // 不放签名配置（用户：测试阶段只用 debug）
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
