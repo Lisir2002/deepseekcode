@@ -88,7 +88,7 @@ class QualityGatePipeline {
         }
 
         // Q8 粒度分析评分合理性（仅 T4 且 control=GRANULARITY_ANALYSE）
-        if (d.meta.echoControl == ControlType.GRANULARITY_ANALYSE) {
+        if (d.meta.echoControl.control == ControlType.GRANULARITY_ANALYSE) {
             gates += q8GranularityAnalysisReasonable(d, expectedGranularity)
             if (failFast && gates.last().pass.not()) return PipelineResult(false, gates)
         } else {
@@ -115,10 +115,10 @@ class QualityGatePipeline {
     fun q1SchemaValid(jsonString: String, d: PlannerOutput): QualityGateResult {
         return try {
             val missing = mutableListOf<String>()
-            if (d.milestones.isEmpty() && d.meta.refuseReason.isNullOrBlank() && d.meta.echoControl != ControlType.REFUSE) {
+            if (d.milestones.isEmpty() && d.meta.refuseReason.isNullOrBlank() && d.meta.echoControl.control != ControlType.REFUSE) {
                 missing += "milestones 为空但未设置 REFUSE/拒答"
             }
-            if (d.meta.echoControl == ControlType.GRANULARITY_ANALYSE && d.granularityAnalysis == null) {
+            if (d.meta.echoControl.control == ControlType.GRANULARITY_ANALYSE && d.granularityAnalysis == null) {
                 missing += "control=GRANULARITY_ANALYSE 但 granularity_analysis 段缺失"
             }
             if (d.meta.refuseReason.isNullOrBlank().not()) {
@@ -159,7 +159,7 @@ class QualityGatePipeline {
         val errs = mutableListOf<String>()
         if (expG != null && d.meta.echoGranularity != expG) errs += "granularity 期望 $expG 实际 ${d.meta.echoGranularity}"
         if (expP != null && d.meta.echoPlanningLevel != expP) errs += "planning_level 期望 $expP 实际 ${d.meta.echoPlanningLevel}"
-        if (expC != null && d.meta.echoControl != expC) errs += "control 期望 $expC 实际 ${d.meta.echoControl}"
+        if (expC != null && d.meta.echoControl.control != expC) errs += "control 期望 $expC 实际 ${d.meta.echoControl.control}"
         if (expScope != null && d.meta.scopeTag != expScope) errs += "scope_tag 期望 $expScope 实际 ${d.meta.scopeTag}"
         if (expScopeHint != null && d.dispatch.scopeHint.sorted() != expScopeHint.sorted()) {
             errs += "scope_hint 期望 ${expScopeHint.sorted()} 实际 ${d.dispatch.scopeHint.sorted()}"

@@ -30,7 +30,10 @@ data class PlannerOutput(
         append("scope_tag=").append(meta.scopeTag).append('|')
         append("echo_granularity=").append(meta.echoGranularity).append('|')
         append("echo_planning_level=").append(meta.echoPlanningLevel).append('|')
-        append("echo_control=").append(meta.echoControl).append('|')
+        append("echo_control=").append(meta.echoControl.granularity).append('+')
+            .append(meta.echoControl.planningLevel).append('+')
+            .append(meta.echoControl.control).append('+')
+            .append(meta.echoControl.scope).append('|')
         append("estimated_total_steps=").append(meta.estimatedTotalSteps).append('|')
         append("estimated_cost_yuan=").append(meta.estimatedCostYuan).append('|')
         append("estimated_minutes=").append(meta.estimatedMinutesWallClock).append('|')
@@ -66,7 +69,7 @@ data class Meta(
     @SerialName("echo_planning_level")
     val echoPlanningLevel: PlanningLevel,
     @SerialName("echo_control")
-    val echoControl: ControlType,
+    val echoControl: EchoControl,
     val confidence: Float, // 0.00~1.00
     @SerialName("needs_user_confirmation")
     val needsUserConfirmation: Boolean = false,
@@ -89,7 +92,20 @@ enum class Granularity { COARSE, MEDIUM, FINE }
 enum class PlanningLevel { MILESTONE, SUBTASK }
 
 @Serializable
-enum class ControlType { NORMAL, GRANULARITY_CONVERT, GRANULARITY_ANALYSE, FAILURE_DISPATCH, PLAN_MILESTONE, PLAN_SUBTASK, RERANK, REFUSE }
+enum class ControlType { NORMAL, GRANULARITY_CONVERT, GRANULARITY_ANALYSE, FAILURE_DISPATCH, PLAN_MILESTONE, PLAN_SUBTASK, RERANK, REFUSE, DISPATCH }
+
+/** v0.7 meta.echo_control = 4 字段结构化回显 ControlToken（Schema 0.4 最终形态，与 GenerateLoraDataset prompt 第 4 条对齐）*/
+@Serializable
+data class EchoControl(
+    val granularity: Granularity,
+    @SerialName("planning_level")
+    val planningLevel: PlanningLevel,
+    val control: ControlType,
+    val scope: ScopeTag
+) {
+    /** 兼容旧单 enum 对比的快捷属性（Q3/q9/QualityGatePipeline 等场景） */
+    val type: ControlType get() = control
+}
 
 /** v0.7 Scope 三分类：Planner 自动识别不做手动模式切换 */
 @Serializable

@@ -76,7 +76,7 @@ fun main(args: Array<String>) {
             jsonString = jsonPlan,
             expectedGranularity = plan.meta.echoGranularity,
             expectedPlanningLevel = plan.meta.echoPlanningLevel,
-            expectedControl = plan.meta.echoControl,
+            expectedControl = plan.meta.echoControl.control,
             expectedScope = plan.meta.scopeTag,
             expectedScopeHint = plan.dispatch.scopeHint,
             failFast = false
@@ -114,7 +114,7 @@ fun main(args: Array<String>) {
             |scope=$ctrlScope
             |scope_hint=${ctrlHint.joinToString("+")}
             |planning_level=${plan.meta.echoPlanningLevel.name}
-            |control=${plan.meta.echoControl.name}
+            |control=${plan.meta.echoControl.control.name}
             |language=zh-CN
             |[ControlToken End]
             |

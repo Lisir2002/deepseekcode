@@ -51,11 +51,21 @@ echo "  （默认 dry-run，不加 --live 则不耗 DeepSeek token）"
 echo "=================================================="
 
 T0=$(date +%s)
+# ===== 自动探测 HTTP/HTTPS 代理（从 env）=====
+PROXY_JVM=""
+if [[ -n "${https_proxy:-${HTTPS_PROXY:-}}" ]]; then
+  P="${https_proxy:-$HTTPS_PROXY}"
+  P_HOST="${P#http://}" ; P_HOST="${P_HOST%%/*}" ; P_PORT="${P_HOST##*:}" ; P_HOST="${P_HOST%%:*}"
+  [[ -n "$P_HOST" && -n "$P_PORT" ]] && PROXY_JVM="$PROXY_JVM -Dhttps.proxyHost=$P_HOST -Dhttps.proxyPort=$P_PORT -Dhttp.proxyHost=$P_HOST -Dhttp.proxyPort=$P_PORT"
+fi
+echo "  Proxy JVM args: ${PROXY_JVM:-(none, 直连)}"
 $JAVACMD \
   -Xmx2048m \
   -XX:MaxMetaspaceSize=768m \
   -XX:+UseSerialGC \
   -Dfile.encoding=UTF-8 \
+  -Djava.net.preferIPv4Stack=true \
+  $PROXY_JVM \
   -cp "$FULL_CP" \
   com.deepseek.coder.planner.bench.tools.LiveF1BacktestAgainstDeepSeekKt \
   "${ARGS[@]}"
