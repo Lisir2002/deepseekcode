@@ -36,7 +36,7 @@ fun main(args: Array<String>) = runBlocking {
     }
 
     // F1 Case 采样（取前 n 条）
-    val f1All = F1DecisionQualityBenchmark.sampleCases()
+    val f1All = F1DecisionQualityBenchmark.defaultSampleCases()
     val cases = f1All.take(opts.nCases)
 
     val systemPrompt = """
@@ -225,3 +225,4 @@ private data class BacktestOpts(
         }
     }
 }
+

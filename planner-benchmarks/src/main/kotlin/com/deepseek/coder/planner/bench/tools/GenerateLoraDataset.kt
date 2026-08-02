@@ -69,7 +69,7 @@ fun main(args: Array<String>) {
         |Output language: FOLLOW user's language preference tag.
     """.trimMargin()
 
-    for ((prompt, plan) in pairs) {
+    pairs.forEachIndexed { pairIdx, (prompt, plan) ->
         // 跑质检
         val jsonPlan = schemaJson.encodeToString(PlannerOutput.serializer(), plan)
         val qr = pipeline.runAll(
@@ -77,42 +77,45 @@ fun main(args: Array<String>) {
             expectedGranularity = plan.meta.echoGranularity,
             expectedPlanningLevel = plan.meta.echoPlanningLevel,
             expectedControl = plan.meta.echoControl,
-            expectedScope = plan.meta.dispatch.scope,
-            expectedScopeHint = plan.meta.dispatch.scopeHint,
+            expectedScope = plan.meta.scopeTag,
+            expectedScopeHint = plan.dispatch.scopeHint,
             failFast = false
         )
         val qFlags = BooleanArray(10)
         qr.gates.forEach { g ->
-            val idx = g.name.removePrefix("Q").toIntOrNull()
+            val idx = g.gateId.removePrefix("Q").toIntOrNull()
             if (idx != null) qFlags[idx - 1] = g.pass
         }
         (0..9).forEach { if (qFlags[it]) gateCounts[it]++ }
         val allPass = qFlags.all { it }
         if (allPass) allPassCount++
 
-        qualityReport.append(plan.meta.requestId).append(',')
-            .append(plan.meta.dispatch.scope.name).append(',')
+        // Meta 没有 requestId 字段 → 用序号合成稳定的 sampleId
+        val sampleId = "S%05d".format(pairIdx + 1)
+
+        qualityReport.append(sampleId).append(',')
+            .append(plan.meta.scopeTag.name).append(',')
             .append(plan.meta.echoGranularity.name).append(',')
             .append(qFlags.joinToString(",") { if (it) "1" else "0" }).append(',')
             .appendLine(if (allPass) "1" else "0")
 
-        promptFile.appendLine("[$allPass] ${plan.meta.requestId} | ${plan.meta.dispatch.scope} | ${plan.meta.echoGranularity}")
+        promptFile.appendLine("[$allPass] $sampleId | ${plan.meta.scopeTag} | ${plan.meta.echoGranularity}")
         promptFile.appendLine("    $prompt")
 
         planFile.appendLine(jsonPlan)
 
         // ---------- LoRA 消息三元组 ----------
         val ctrlGran = plan.meta.echoGranularity.name
-        val ctrlScope = plan.meta.dispatch.scope.name
-        val ctrlHint = plan.meta.dispatch.scopeHint.ifEmpty { listOf("-") }.joinToString("+")
+        val ctrlScope = plan.meta.scopeTag.name
+        val ctrlHint = if (plan.dispatch.scopeHint.isEmpty()) listOf("-") else plan.dispatch.scopeHint
         val userMsg = """
             |[ControlToken Begin]
             |granularity=$ctrlGran
             |scope=$ctrlScope
-            |scope_hint=$ctrlHint
+            |scope_hint=${ctrlHint.joinToString("+")}
             |planning_level=${plan.meta.echoPlanningLevel.name}
             |control=${plan.meta.echoControl.name}
-            |language=${plan.meta.languageTag}
+            |language=zh-CN
             |[ControlToken End]
             |
             |$prompt
@@ -128,10 +131,11 @@ fun main(args: Array<String>) {
         loraFile.appendLine(schemaJson.encodeToString(LoraMessageRow.serializer(), msgRow))
     }
 
-    loraFile.close(); planFile.close(); promptFile.close(); qualityReport.close()
+    loraFile.close(); planFile.close(); promptFile.close()
+    // qualityReport 是 StringBuilder 不是 Writer，不需要 close
 
     // ---------- Step 4: Meta 报告 ----------
-    val scopeBuckets = pairs.groupingBy { it.second.meta.dispatch.scope }.eachCount()
+    val scopeBuckets = pairs.groupingBy { it.second.meta.scopeTag }.eachCount()
     val granBuckets = pairs.groupingBy { it.second.meta.echoGranularity }.eachCount()
     val meta = LoraMeta(
         n = opts.n,
