@@ -1,36 +1,39 @@
-# DeepCoder v1.0.0 - Bug Fix Release
+# DeepCoder 发布记录
 
-**Build Date:** 2026-08-02
+## v1.1.0 (2025-08-02) · Orchestrator + LoRA 接口预埋
 
-## 修复 Fixes
+### 新增
+- 🧠 Orchestrator 6 节点 FSM：意图分类 → 需求澄清 → 上下文治理 → 任务拆解 → 流式执行 → 代码自检 / 自动重试
+  - 支持 10 种代码意图（生成/重构/解释/修复/翻译/Review/架构/FIM/闲聊/澄清）
+  - 中文关键词 fallback，无网络也能给出分类初值
+  - CLARIFY_QUESTION：信息不足时 UI 弹出补充信息面板
+  - SELF_CHECK + RETRY_FIX：自检失败自动追加修复指令重跑，最多 selfCheckMaxRetry 次
+- 📐 UI：折叠式 WorkflowProgressCard 展示编排节点、步骤阶梯、自检结果
+- 🪜 LoRA 接口预埋：
+  - 设置页新增「自定义 Fine-tune 模型 ID」输入框（填好后模型请求自动切到 ft-id）
+  - 设置页新增「本地 JSONL 训练数据采集」开关（默认关闭，符合隐私）
+  - 采集文件路径：`/data/data/com.deepseek.coder/files/deepcoder_ft_samples.jsonl`
+  - 同步 releases 目录附 200 条预合成 Kotlin/Android 训练样本（deepseek_coder_ft_train_200_v1.1.0.jsonl）
+- 💾 SettingsRepository 新增 5 个 DataStore 键（orchestratorEnabled / customFineTuneModelId / fineTuneDataCollectionEnabled / selfCheckMaxRetry / clarificationsAutoAsk）
 
-### 🔴 请求格式错误修复 (Critical)
-- **问题**: 发送聊天请求时报错  
-  `请求格式错误：Failed to deserialize the JSON body into the target type: messages[0]: content should be a string or a list`
-- **根因**: `ChatMessageDto.content` 使用了 `MessageContentDto` 密封类，序列化后产生嵌套对象：
-  ```json
-  // ❌ 错误格式
-  {"content":{"type":"Text","text":"你好"}}
-  ```
-- **修复**:
-  1. 请求侧 `ChatMessageDto.content` 改为 `String?`，序列化后为纯字符串：
-     ```json
-     // ✅ 正确格式
-     {"content":"你好"}
-     ```
-  2. 响应侧新增 `ChatResponseMessageDto`，使用自定义 `ContentAsStringSerializer` 处理服务端返回 content 可能为 string / array 两种格式的多态问题
-  3. 更新 `ChatRepository.domainToDto` / `dtoToDomain` 映射逻辑
+### 修复 & 优化
+- 修复请求体 `content` 字段为纯字符串，完全符合 DeepSeek /chat/completions schema，不会再报 "content should be a string or a list"
+- effectiveModelId 优先使用自定义 ft-id，允许企业渠道训练好的 LoRA 模型无缝接入
+- 新增 `ChatRepository.sendChatBlockingJsonOverride`，支持 response_format=json_object，供 Orchestrator 分类/拆解/自检 3 节点使用
 
-### 其他修复
-- 修复 `ChatRepository` 中 `reasoning: String?` 空安全调用错误（`m.reasoning.takeIf` → `m.reasoning?.takeIf`）
+### APK
+- Debug: releases/DeepCoder-v1.1.0-debug.apk (~20 MB)
+- Release (unsigned): releases/DeepCoder-v1.1.0-release-unsigned.apk (~14 MB)
 
-## 验证 Verification (云端测试通过)
-| 测试项 | 结果 | 说明 |
-|---|---|---|
-| 单元测试 `chatMessageDto_content_is_plain_string` | ✅ PASS | JSON: `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"写 HelloWorld Kotlin"}]}` |
-| Chat 非流式 `deepseek-v4-flash` | ✅ HTTP 200 | 返回 HelloWorld Kotlin 代码，usage 正常 (506 tokens) |
-| Chat 流式 + reasoning_effort=medium | ✅ PASS | 1026 frames, 3577 chars reasoning delta |
-| FIM `/beta/completions` | ✅ HTTP 200 | 正确补全冒泡排序内层 swap 代码 |
+### 验证
+- compileDebugKotlin：0 error
+- testDebugUnitTest：13/13 PASS
+- 独立 API 连通性脚本（/workspace/test_deepseek_api.kt）：非流式/SSE 流式/FIM 三项全部通过（使用 sk-9dd7227bc1684084b4d2922af42f1aa1）
 
-## 文件 Hashes (SHA-256)
-生成时请在本地运行 `sha256sum releases/*.apk apk/*.apk` 验证。
+### 已知限制
+- DeepSeek 目前公共 OpenAPI 不开放 /v1/files 与 /v1/fine_tuning/jobs 等端点（404），LoRA 训练需走企业商务渠道，v1.1.0 已按企业要求的 JSONL schema 预埋采集与模型切换逻辑
+
+---
+
+## v1.0.0
+- 初版：MVVM + Clean Architecture，Chat / Settings / Sessions / Editor 四大页面，FIM 补全，思考模式展示
