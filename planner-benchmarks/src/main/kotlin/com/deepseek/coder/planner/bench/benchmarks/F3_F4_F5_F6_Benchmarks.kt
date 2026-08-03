@@ -102,7 +102,7 @@ class F3ContrastiveBenchmark(
             }
             val out = PlannerOutput(
                 meta = Meta(outputVersion="0.4", echoGranularity=gran, echoPlanningLevel=PlanningLevel.MILESTONE,
-                    echoControl=ControlType.NORMAL, confidence=0.88f, estimatedTotalSteps=steps, scopeTag=scope),
+                    echoControl=EchoControl(granularity=gran, planningLevel=PlanningLevel.MILESTONE, control=ControlType.NORMAL, scope=scope), confidence=0.88f, estimatedTotalSteps=steps, scopeTag=scope),
                 dispatch = Dispatch(defaultTier="L2-Standard", defaultModel="v4-flash", capabilityPriorityMap=ms.associate { it.id to "CAP_CODE_GENERATE" }),
                 milestones = ms,
                 topology = Topology(milestoneEdges = ms.mapIndexed { i, m ->

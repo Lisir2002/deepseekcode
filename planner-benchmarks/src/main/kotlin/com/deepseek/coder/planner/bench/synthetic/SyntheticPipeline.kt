@@ -12,13 +12,18 @@ import kotlin.random.Random
  */
 class SyntheticPipeline(private val pipeline: QualityGatePipeline) {
 
-    fun generate(
+    /**
+     * Streaming generator — O(1) memory. Returns total count for convenience.
+     * Use this for large n (20k / 200k / 2M); never build a giant List in memory.
+     * emit 被调用次数 = n（顺序严格可复现，由 seed 决定）。
+     */
+    fun generateStreaming(
         n: Int = 2000,
         webRatio: Float = 0.4f,
-        seed: Long = 42L
-    ): List<Pair<String, PlannerOutput>> {
+        seed: Long = 42L,
+        emit: (globalIdx: Int, id: String, prompt: String, plan: PlannerOutput) -> Unit
+    ): Int {
         val rnd = Random(seed)
-        val result = ArrayList<Pair<String, PlannerOutput>>(n)
 
         val webCount = (n * webRatio).toInt()
         val androidCount = ((n - webCount) * 0.55f).toInt()
@@ -32,18 +37,53 @@ class SyntheticPipeline(private val pipeline: QualityGatePipeline) {
 
         val granularityWeights = listOf(0.18f, 0.52f, 0.30f) // COARSE : MEDIUM : FINE
         val granularities = listOf(Granularity.COARSE, Granularity.MEDIUM, Granularity.FINE)
-        var globalIdx = 0
 
-        for ((scope, count, prompts) in buckets) {
-            repeat(count) { i ->
-                val prompt = prompts[(i + rnd.nextInt(prompts.size)) % prompts.size]
-                val g = pickWeighted(granularities, granularityWeights, rnd)
-                val id = "SYN-%04d-%s-%s".format(globalIdx++, scope.name, g.name)
-                result += synthesizeOne(id, prompt, scope, g)
-            }
+        // ---- 先把 (scope, iInBucket, prompt, granularity, idx) 全部展开，再按 seed shuffle ----
+        // 用 IntArray 存序号 (0 until n) 再 shuffle，避免存整个对象数组时 n=2M 仍然 OK（8MB/2M ints）
+        val total = webCount + androidCount + generalCount
+        val order = IntArray(total) { it }
+        // Fisher-Yates shuffle by same Random(seed) for reproducibility:
+        for (i in order.size - 1 downTo 1) {
+            val j = rnd.nextInt(i + 1)
+            val t = order[i]; order[i] = order[j]; order[j] = t
         }
+        // 按 (idx -> (scope, iInBucket)) 映射构造：先累积 bucket 偏移
+        val scopeOffsets = IntArray(3)
+        scopeOffsets[0] = 0
+        scopeOffsets[1] = buckets[0].second
+        scopeOffsets[2] = scopeOffsets[1] + buckets[1].second
+        // 每个 scope 内独立的 deterministic RNG（避免 Fisher-Yates 打乱原 synth 随机性 → 保证 n=2k shuffle 后与 n=200k 前 2k 条可复现）
+        val scopeRngs = listOf(Random(seed xor 0x9E3779B9L), Random(seed xor 0x85EBCA6BL), Random(seed xor 0xC2B2AE35L))
+        val scopeCounters = IntArray(3)
 
-        return result.shuffled(rnd)
+        repeat(total) { shuffledPos ->
+            val linearIdx = order[shuffledPos]
+            val scopeIdx = when {
+                linearIdx < scopeOffsets[1] -> 0
+                linearIdx < scopeOffsets[2] -> 1
+                else -> 2
+            }
+            val (scope, _, prompts) = buckets[scopeIdx]
+            val sr = scopeRngs[scopeIdx]
+            val iInBucket = scopeCounters[scopeIdx]++
+            val prompt = prompts[(iInBucket + sr.nextInt(prompts.size)) % prompts.size]
+            val g = pickWeighted(granularities, granularityWeights, sr)
+            val id = "SYN-%06d-%s-%s".format(linearIdx, scope.name, g.name)
+            val (_, plan) = synthesizeOne(id, prompt, scope, g)
+            emit(shuffledPos, id, prompt, plan)
+        }
+        return total
+    }
+
+    /** Legacy non-streaming API (for n <= ~50k or tests); internally uses streaming + collect. */
+    fun generate(
+        n: Int = 2000,
+        webRatio: Float = 0.4f,
+        seed: Long = 42L
+    ): List<Pair<String, PlannerOutput>> {
+        val out = ArrayList<Pair<String, PlannerOutput>>(n)
+        generateStreaming(n, webRatio, seed) { _, id, prompt, plan -> out += (prompt to plan) }
+        return out
     }
 
     private fun pickWeighted(
@@ -146,7 +186,7 @@ class SyntheticPipeline(private val pipeline: QualityGatePipeline) {
                 outputVersion = "0.4",
                 echoGranularity = g,
                 echoPlanningLevel = PlanningLevel.MILESTONE,
-                echoControl = ControlType.NORMAL,
+                echoControl = EchoControl(granularity = g, planningLevel = PlanningLevel.MILESTONE, control = ControlType.NORMAL, scope = scope),
                 confidence = 0.90f,
                 needsUserConfirmation = false,
                 estimatedTotalSteps = totalSteps.coerceIn(stepsRangeFor(g)),

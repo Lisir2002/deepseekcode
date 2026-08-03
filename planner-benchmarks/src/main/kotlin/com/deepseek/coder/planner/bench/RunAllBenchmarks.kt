@@ -139,7 +139,7 @@ fun main(args: Array<String>) {
 private fun sampleBilingualPair(scope: ScopeTag, g: Granularity, m1Title: String, acSuffix: String): PlannerOutput {
     return PlannerOutput(
         meta = Meta(outputVersion="0.4", echoGranularity = g, echoPlanningLevel = PlanningLevel.MILESTONE,
-            echoControl = ControlType.NORMAL, confidence=0.88f, estimatedTotalSteps=7, scopeTag = scope),
+            echoControl = EchoControl(granularity = g, planningLevel = PlanningLevel.MILESTONE, control = ControlType.NORMAL, scope = scope), confidence=0.88f, estimatedTotalSteps=7, scopeTag = scope),
         dispatch = Dispatch(defaultTier="L2-Standard", defaultModel="v4-flash",
             capabilityPriorityMap = mapOf("M1" to "CAP_CODE_GENERATE", "M2" to "CAP_CODE_GENERATE", "M3" to "CAP_RUN_SYNTAX_CHECK"),
             scopeHint = listOf("DEMO")),
