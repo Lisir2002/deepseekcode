@@ -37,19 +37,6 @@ class OrchestratorUnitTest {
     }
 
     // --------------------------------------------------------------
-    // AppSettings + effective model id (LoRA override)
-    // --------------------------------------------------------------
-    @Test
-    fun effectiveModelId_uses_custom_ft_id_when_set() {
-        val def = AppSettings()
-        assertEquals("deepseek-v4-flash", def.effectiveModelId)
-        val custom = def.copy(customFineTuneModelId = "deepseek-v4-flash-ft-42")
-        assertEquals("deepseek-v4-flash-ft-42", custom.effectiveModelId)
-        val blank = def.copy(customFineTuneModelId = "  ")
-        assertEquals("deepseek-v4-flash", blank.effectiveModelId)
-    }
-
-    // --------------------------------------------------------------
     // ChatCompletionRequest JSON-mode (response_format) serialisation
     // --------------------------------------------------------------
     @Test

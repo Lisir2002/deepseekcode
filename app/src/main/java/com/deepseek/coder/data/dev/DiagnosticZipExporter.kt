@@ -40,7 +40,6 @@ object DiagnosticZipExporter {
                 count += zip.writeTextEntry("last_plans.json", buildLastPlans(context))
                 count += zip.writeTextEntry("app_logs.txt", buildAppLogs(context))
                 count += zip.writeTextEntry("prompt_audit.txt", buildPromptAudit(context))
-                count += zip.writeTextEntry("fine_tune_bucket.json", buildFineTuneBucket(context))
                 count += zip.writeTextEntry("usage_stats.json", buildUsageStats(context))
                 count += zip.writeTextEntry("device_info.json", buildDeviceInfo(context))
                 zip.finish()
@@ -95,7 +94,7 @@ object DiagnosticZipExporter {
             ?.map { f ->
                 mapOf(
                     "file" to f.name,
-                    "size_bytes" to f.length(),
+                    "size_bytes" to f.length().toString(),
                     "last_modified" to Date(f.lastModified()).toString()
                 )
             }.orEmpty()
@@ -115,7 +114,7 @@ object DiagnosticZipExporter {
         val exported_at: String,
         val db_exists: Boolean,
         val db_size_bytes: Long,
-        val recent_session_files: List<Map<String, @Serializable Any?>>,
+        val recent_session_files: List<Map<String, String>>,
         val sample_messages: List<Map<String, String>>
     )
 
@@ -124,7 +123,7 @@ object DiagnosticZipExporter {
         if (!f.exists()) return emptyList()
         val result = ArrayList<Map<String, String>>(limit)
         f.useLines { lines ->
-            lines.takeLast(limit).forEach { line ->
+            lines.toList().takeLast(limit).forEach { line ->
                 if (line.isNotBlank()) {
                     result += mapOf("raw" to line.take(500))
                 }
@@ -212,35 +211,6 @@ object DiagnosticZipExporter {
             append('\n')
         }
     }
-
-    // ---------- 6. fine_tune_bucket.json ----------
-    private fun buildFineTuneBucket(context: Context): String {
-        val ftJsonl = File(context.filesDir, "deepcoder_ft_samples.jsonl")
-        val lines = if (ftJsonl.exists()) ftJsonl.useLines { it.toList() } else emptyList()
-        val preview = lines.takeLast(5).map { it.take(1500) }
-        return prettyJson.encodeToString(
-            FineTuneBucket(
-                exported_at = nowIso(),
-                file_exists = ftJsonl.exists(),
-                absolute_path = ftJsonl.absolutePath,
-                total_records = lines.size,
-                total_bytes = if (ftJsonl.exists()) ftJsonl.length() else 0L,
-                last_modified = if (ftJsonl.exists()) Date(ftJsonl.lastModified()).toString() else null,
-                last_5_records_preview = preview
-            )
-        )
-    }
-
-    @Serializable
-    private data class FineTuneBucket(
-        val exported_at: String,
-        val file_exists: Boolean,
-        val absolute_path: String,
-        val total_records: Int,
-        val total_bytes: Long,
-        val last_modified: String?,
-        val last_5_records_preview: List<String>
-    )
 
     // ---------- 7. usage_stats.json ----------
     private fun buildUsageStats(context: Context): String {

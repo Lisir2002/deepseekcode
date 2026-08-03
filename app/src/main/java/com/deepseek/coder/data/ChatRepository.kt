@@ -153,7 +153,7 @@ class ChatRepository @Inject constructor(
                 if (ratio > 0) (settings.maxTokens * ratio).toInt().coerceAtLeast(512) else null
             } else null
             return ChatCompletionRequest(
-                model = settings.effectiveModelId,
+                model = settings.model.id,
                 messages = msgs,
                 temperature = settings.temperature,
                 top_p = settings.topP,

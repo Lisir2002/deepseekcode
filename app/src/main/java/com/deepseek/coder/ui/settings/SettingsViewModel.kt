@@ -62,12 +62,8 @@ class SettingsViewModel @Inject constructor(
     fun updateBaseUrl(value: String) = persist { it.copy(baseUrl = value.trim().ifBlank { AppSettings.DEFAULT_BASE_URL }) }
     fun updateBetaBaseUrl(value: String) = persist { it.copy(betaBaseUrl = value.trim().ifBlank { AppSettings.DEFAULT_BETA_BASE_URL }) }
 
-    // ---- v1.1 Orchestrator / LoRA settings ----
+    // ---- v1.1 Orchestrator settings ----
     fun updateOrchestratorEnabled(value: Boolean) = persist { it.copy(orchestratorEnabled = value) }
-    fun updateCustomFineTuneModelId(value: String) =
-        persist { it.copy(customFineTuneModelId = value.trim().takeIf { s -> s.isNotBlank() }) }
-    fun updateFineTuneDataCollectionEnabled(value: Boolean) =
-        persist { it.copy(fineTuneDataCollectionEnabled = value) }
     fun updateSelfCheckMaxRetry(value: Int) = persist { it.copy(selfCheckMaxRetry = value.coerceIn(0, 5)) }
     fun updateClarificationsAutoAsk(value: Boolean) = persist { it.copy(clarificationsAutoAsk = value) }
 

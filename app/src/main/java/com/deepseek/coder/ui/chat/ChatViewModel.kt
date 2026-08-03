@@ -7,7 +7,6 @@ import com.deepseek.coder.core.AppError
 import com.deepseek.coder.core.AppLogger
 import com.deepseek.coder.data.SessionRepository
 import com.deepseek.coder.data.settings.SettingsRepository
-import com.deepseek.coder.data.telemetry.FineTuneCollector
 import com.deepseek.coder.domain.models.ChatMessage
 import com.deepseek.coder.domain.models.ChatRole
 import com.deepseek.coder.domain.models.ChatSession
@@ -37,7 +36,6 @@ class ChatViewModel @Inject constructor(
     private val orchestrator: Orchestrator,
     private val settingsRepository: SettingsRepository,
     private val sessionRepository: SessionRepository,
-    private val ftCollector: FineTuneCollector,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
@@ -241,13 +239,6 @@ class ChatViewModel @Inject constructor(
                         persistSnapshot(msgs, sessionId)
                         old.copy(messages = msgs)
                     }
-                }
-                // Record training sample only if user opted in
-                viewModelScope.launch {
-                    runCatching {
-                        val historyPlusFinal = contextMsgs + userMsg + final
-                        ftCollector.recordConversation(session, historyPlusFinal, final)
-                    }.onFailure { AppLogger.w(it, "recordConversation failed") }
                 }
                 _state.update { it.copy(streaming = false, workflowState = WorkflowState.DONE) }
             }

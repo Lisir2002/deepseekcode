@@ -90,14 +90,6 @@ class SettingsRepositoryEx @Inject constructor(
         parent.current().copy(orchestratorEnabled = value)
     )
 
-    suspend fun updateCustomFineTuneModelId(value: String?) = parent.update(
-        parent.current().copy(customFineTuneModelId = value?.takeIf { it.isNotBlank() })
-    )
-
-    suspend fun updateFineTuneDataCollectionEnabled(value: Boolean) = parent.update(
-        parent.current().copy(fineTuneDataCollectionEnabled = value)
-    )
-
     suspend fun updateSelfCheckMaxRetry(value: Int) = parent.update(
         parent.current().copy(selfCheckMaxRetry = value.coerceIn(0, 5))
     )

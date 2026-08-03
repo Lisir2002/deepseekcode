@@ -1,9 +1,12 @@
 package com.deepseek.coder.data.settings
 
+import kotlinx.serialization.Serializable
+
 /**
  * Immutable domain settings model.
  * Default values tuned for code-writing use-case per DeepSeek docs recommendations.
  */
+@Serializable
 data class AppSettings(
     val model: DeepSeekModel = DeepSeekModel.V4_FLASH,
     val temperature: Float = 0.2f,
@@ -19,10 +22,8 @@ data class AppSettings(
     val betaBaseUrl: String = DEFAULT_BETA_BASE_URL,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val cumulativeTokens: Long = 0L,
-    // ---- Orchestrator + LoRA settings (v1.1) ----
+    // ---- Orchestrator settings (v1.1) ----
     val orchestratorEnabled: Boolean = true,
-    val customFineTuneModelId: String? = null,
-    val fineTuneDataCollectionEnabled: Boolean = false,
     val selfCheckMaxRetry: Int = 1,
     val clarificationsAutoAsk: Boolean = true,
     // ---- Planner granularity + scope (v1.2) ----
@@ -50,13 +51,6 @@ data class AppSettings(
                 entries.firstOrNull { it.name.equals(v, ignoreCase = true) } ?: MEDIUM
         }
     }
-
-    /** Effective model ID used for API calls.  If the user configured a custom fine-tune
-     *  model id (obtained e.g. from LoRA training jobs), we use it directly instead of the
-     *  built-in enum.  This allows LoRA-trained models to plug into any workflow without
-     *  touching model enum entries. */
-    val effectiveModelId: String
-        get() = customFineTuneModelId?.takeIf { it.isNotBlank() } ?: model.id
 
     enum class ReasoningEffort(val value: String) {
         LOW("low"), MEDIUM("medium"), HIGH("high"), DISABLED("");

@@ -222,24 +222,6 @@ fun SettingsScreen(
                 }
             }
 
-            SectionCard("LoRA 微调 / 自训练模型（v1.1）") {
-                Labeled("自定义 Fine-tune 模型 ID") {
-                    OutlinedTextField(
-                        value = s.customFineTuneModelId.orEmpty(),
-                        onValueChange = viewModel::updateCustomFineTuneModelId,
-                        label = { Text("留空则使用上面选的默认模型。填 LoRA 训练完成后返回的 Model ID 即可切换。") },
-                        placeholder = { Text("例如 deepseek-v4-flash-ft-xxxxxx") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-                Labeled("匿名收集对话以合成训练集（仅本地，不会上传）") {
-                    Switch(
-                        checked = s.fineTuneDataCollectionEnabled,
-                        onCheckedChange = viewModel::updateFineTuneDataCollectionEnabled
-                    )
-                }
-            }
-
             SectionCard("用量统计") {
                 Labeled("累计 Token 用量") {
                     Text("${s.cumulativeTokens} tokens", fontWeight = FontWeight.SemiBold)

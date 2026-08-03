@@ -1,5 +1,52 @@
 # DeepCoder 发布记录
 
+## v1.2.0 (2026-08-03) · 丢弃 LoRA 训练计划，回归纯通用大模型 + Orchestrator
+
+### 重大决策
+- ❌ **正式废弃 LoRA 小模型训练计划**：原 `SPEC-Planner-v0.7.md` 中 Planner-Actor-Verifier 三角协同 + 专用 LoRA 小模型训练的全部计划予以丢弃，不再执行。
+- 根因：DeepSeek 公共 OpenAPI 不开放 `/v1/fine_tuning/jobs` 与 `/v1/files` 端点（返回 404），LoRA 训练需走企业商务渠道；且真实 API F1 回测显示通用大模型当 Planner 不达标（v4-flash 81.33% / v4-pro 72.00%，均低于 85% 阈值），但经评估决定不再走自训练路线。
+- App 现定位为：**通用 DeepSeek 大模型（v4-flash / v4-pro）+ Orchestrator 6 节点 FSM 编排** 的代码助手，不再具备自训练能力。
+
+### 删除（训练相关全部清空）
+- `SPEC-Planner-v0.7.md`：训练规格文档（整文件删除）
+- `planner-benchmarks/`：整个 JVM 模块（F1~F6 评测 / Q1~Q10 质检 / 合成管线 / LoRA 工具链 / LiveF1 回测工具）
+- `scripts/`：4 个训练脚本（`deepseek-lora-cli.sh` / `run-planner-lora-pipeline.sh` / `run-gen-dataset.sh` / `run-f1-backtest.sh`），仅保留 `ldplayer-automate.sh`（模拟器测试）
+- `releases/deepseek_coder_ft_train_200_v1.1.0.jsonl`：预合成训练样本
+- `settings.gradle.kts` / `build.gradle.kts`：移除 `:planner-benchmarks` 模块 include 与 `kotlin.jvm` 插件
+
+### App 层移除 LoRA 接口预埋
+- `AppSettings.kt`：删除 `customFineTuneModelId` / `fineTuneDataCollectionEnabled` 字段 + `effectiveModelId` 派生属性
+- `SettingsRepository.kt` / `SettingsRepositoryEx.kt` / `SettingsViewModel.kt`：删除对应 DataStore Key、读写、setter
+- `SettingsScreen.kt`：删除「LoRA 微调 / 自训练模型」设置卡片
+- `ChatViewModel.kt`：移除 `FineTuneCollector` 注入与训练样本采集逻辑
+- `ChatRepository.kt`：`effectiveModelId` 回退为 `model.id`
+- `OrchestratorImpl.kt`：删除 `buildFinalSettings`（LoRA 模型覆盖逻辑）
+- `DiagnosticZipExporter.kt`：诊断包移除 `fine_tune_bucket.json`（8 类→7 类文件）
+- `DeveloperPanel.kt`：移除 Q1~Q10 质检开关卡片（该开关属于 planner-benchmarks 质检体系）
+- 删除 `data/telemetry/FineTuneCollector.kt`（本地训练数据采集器，整文件删除）
+
+### 保留
+- ✅ Orchestrator 6 节点 FSM（CLASSIFY → CLARIFY → GOVERN_CONTEXT → DECOMPOSE → EXECUTE → SELF_CHECK）
+- ✅ granularity / scope / rerank 三档粒度与范围控制（运行时 prompt 注入，不依赖训练）
+- ✅ 隐藏开发者面板 + 诊断 Zip 导出（7 类文件）
+- ✅ 所有 v1.0.0 / v1.1.0 的 App 核心功能（Chat / FIM / Sessions / Editor / Settings）
+
+### 顺带修复的源码 bug（构建过程发现）
+- `DeveloperPanel.kt`：`collectAsStateWithLifecycle` import 包名错误（`androidx.compose.runtime` → `androidx.lifecycle.compose`）
+- `AppSettings.kt`：补 `@Serializable` 注解
+- `DiagnosticZipExporter.kt`：`@Serializable Any?` 改 `String`；`Sequence.takeLast` 改 `toList().takeLast`
+- `app/build.gradle.kts`：补 `-opt-in=androidx.compose.foundation.layout.ExperimentalLayoutApi`（FlowRow）
+
+### 构建环境配置
+- `gradle.properties`：追加沙箱代理（`http.proxyHost=127.0.0.1:18080`）+ 延长 socket timeout
+- `settings.gradle.kts`：追加阿里云 Maven 镜像（dl.google.com 经代理不稳定）
+
+### 验证
+- `:app:assembleDebug`：BUILD SUCCESSFUL（0 error，3 既有 deprecation 警告）
+- `:app:testDebugUnitTest`：7/7 PASS（删除 `effectiveModelId` 测试后，原 8 项减为 7 项）
+
+---
+
 ## v1.1.0 (2025-08-02) · Orchestrator + LoRA 接口预埋
 
 ### 新增

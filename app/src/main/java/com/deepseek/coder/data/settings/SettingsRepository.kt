@@ -44,8 +44,6 @@ class SettingsRepository @Inject constructor(
         val THEME = stringPreferencesKey("theme_mode")
         val CUMULATIVE_TOKENS = longPreferencesKey("cumulative_tokens")
         val ORCH_ENABLED = booleanPreferencesKey("orch_enabled")
-        val CUSTOM_FT_MODEL_ID = stringPreferencesKey("custom_ft_model_id")
-        val FT_COLLECTION_ENABLED = booleanPreferencesKey("ft_collection_enabled")
         val SELF_CHECK_MAX_RETRY = intPreferencesKey("self_check_max_retry")
         val CLARIFICATIONS_AUTO_ASK = booleanPreferencesKey("clarifications_auto_ask")
     }
@@ -69,8 +67,6 @@ class SettingsRepository @Inject constructor(
             themeMode = p[Keys.THEME]?.let(ThemeMode::valueOf) ?: defaults.themeMode,
             cumulativeTokens = p[Keys.CUMULATIVE_TOKENS] ?: 0L,
             orchestratorEnabled = p[Keys.ORCH_ENABLED] ?: defaults.orchestratorEnabled,
-            customFineTuneModelId = p[Keys.CUSTOM_FT_MODEL_ID]?.takeIf { it.isNotBlank() },
-            fineTuneDataCollectionEnabled = p[Keys.FT_COLLECTION_ENABLED] ?: defaults.fineTuneDataCollectionEnabled,
             selfCheckMaxRetry = p[Keys.SELF_CHECK_MAX_RETRY] ?: defaults.selfCheckMaxRetry,
             clarificationsAutoAsk = p[Keys.CLARIFICATIONS_AUTO_ASK] ?: defaults.clarificationsAutoAsk
         )
@@ -115,8 +111,6 @@ class SettingsRepository @Inject constructor(
             p[Keys.THEME] = value.themeMode.name
             p[Keys.CUMULATIVE_TOKENS] = value.cumulativeTokens
             p[Keys.ORCH_ENABLED] = value.orchestratorEnabled
-            p[Keys.CUSTOM_FT_MODEL_ID] = value.customFineTuneModelId.orEmpty()
-            p[Keys.FT_COLLECTION_ENABLED] = value.fineTuneDataCollectionEnabled
             p[Keys.SELF_CHECK_MAX_RETRY] = value.selfCheckMaxRetry
             p[Keys.CLARIFICATIONS_AUTO_ASK] = value.clarificationsAutoAsk
         }

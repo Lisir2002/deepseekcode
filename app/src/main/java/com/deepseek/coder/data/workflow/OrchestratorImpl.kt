@@ -81,7 +81,7 @@ class OrchestratorImpl @Inject constructor(
         userMessage: ChatMessage
     ): Flow<WorkflowEvent> = channelFlow {
         val base = settingsRepo.current()
-        val runSettings = buildFinalSettings(base)
+        val runSettings = base
         val currentStateHolder = CurrentState(WorkflowState.IDLE)
         suspend fun transition(to: WorkflowState) {
             val from = currentStateHolder.swap(to)
@@ -539,17 +539,6 @@ class OrchestratorImpl @Inject constructor(
         }
         awaitClose()
     }.flowOn(dispatchers.default).first()
-
-    private fun buildFinalSettings(base: AppSettings): AppSettings {
-        // If user configured a custom fine-tune model id, override the base model wholesale.
-        val customId = base.customFineTuneModelId
-        return if (!customId.isNullOrBlank()) base.copy(
-            model = AppSettings.DeepSeekModel.V4_FLASH /* id below overrides via companion */
-        ).also {
-            // we cannot mutate enum fields after construction; a deeper approach is applied
-            // by ChatRepository.buildRequest which now honours customFineTuneModelId directly.
-        } else base
-    }
 
     // ---- DTO mirrors for JSON schema of workflow nodes ----
     @Serializable
