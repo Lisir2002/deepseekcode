@@ -1,5 +1,24 @@
 # DeepCoder 发布记录
 
+## v1.4.0 (2026-08-03) · 移除警察专家系统，回归通用 Orchestrator
+
+### 重大架构回退
+- 🧹 **移除全局警察专家系统**：删除 `data/police/` 整个目录（8 个文件）+ SPEC-Police-v2.1.md + e2e 测试脚本
+- Orchestrator 回归 v1.2.0 的通用 6 节点 FSM（CLASSIFY/CLARIFY/GOVERN/DECOMPOSE/EXECUTE/SELF_CHECK 全部用内联实现，不依赖警察层）
+- ContextGovernor 回归硬 token 预算裁剪（移除 GOVERN 决策+执行分离的 trimByStrategy）
+- 原因：警察专家系统在实际使用中效果不达预期，且增加调用链路与 API 开销，决定移除以简化架构
+
+### 移除的组件
+- `data/police/PoliceSchemas.kt` / `PolicePrompts.kt` / `GuardRails.kt` / `EscalationTracker.kt`
+- `data/police/PoliceClient.kt` / `ExpertRunner.kt` / `TeamLead.kt` / `DispatcherPolice.kt`
+- `SPEC-Police-v2.1.md`（规格文档）
+- `scripts/police_e2e_test.py` + `police_e2e_result.json`（e2e 测试）
+
+### 保留
+- Orchestrator 6 节点 FSM 主体逻辑（classify/decompose/selfCheck 内联实现）
+- ContextGovernor 硬 token 预算裁剪
+- 单元测试（不依赖警察层，全过）
+
 ## v1.3.0 (2026-08-03) · 警察层 v2.0 上线：1 路由警察 + 12 专家池 + 自适应动态组队
 
 ### 重大架构升级
