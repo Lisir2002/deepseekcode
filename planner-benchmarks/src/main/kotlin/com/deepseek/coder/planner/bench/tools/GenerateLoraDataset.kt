@@ -77,13 +77,13 @@ fun main(args: Array<String>) {
             expectedGranularity = plan.meta.echoGranularity,
             expectedPlanningLevel = plan.meta.echoPlanningLevel,
             expectedControl = plan.meta.echoControl,
-            expectedScope = plan.meta.dispatch.scope,
-            expectedScopeHint = plan.meta.dispatch.scopeHint,
+            expectedScope = plan.meta.scopeTag,
+            expectedScopeHint = plan.dispatch.scopeHint,
             failFast = false
         )
         val qFlags = BooleanArray(10)
         qr.gates.forEach { g ->
-            val idx = g.name.removePrefix("Q").toIntOrNull()
+            val idx = g.gateId.removePrefix("Q").toIntOrNull()
             if (idx != null) qFlags[idx - 1] = g.pass
         }
         (0..9).forEach { if (qFlags[it]) gateCounts[it]++ }
@@ -91,20 +91,20 @@ fun main(args: Array<String>) {
         if (allPass) allPassCount++
 
         qualityReport.append(plan.meta.requestId).append(',')
-            .append(plan.meta.dispatch.scope.name).append(',')
+            .append(plan.meta.scopeTag.name).append(',')
             .append(plan.meta.echoGranularity.name).append(',')
             .append(qFlags.joinToString(",") { if (it) "1" else "0" }).append(',')
             .appendLine(if (allPass) "1" else "0")
 
-        promptFile.appendLine("[$allPass] ${plan.meta.requestId} | ${plan.meta.dispatch.scope} | ${plan.meta.echoGranularity}")
+        promptFile.appendLine("[$allPass] ${plan.meta.requestId} | ${plan.meta.scopeTag} | ${plan.meta.echoGranularity}")
         promptFile.appendLine("    $prompt")
 
         planFile.appendLine(jsonPlan)
 
         // ---------- LoRA 消息三元组 ----------
         val ctrlGran = plan.meta.echoGranularity.name
-        val ctrlScope = plan.meta.dispatch.scope.name
-        val ctrlHint = plan.meta.dispatch.scopeHint.ifEmpty { listOf("-") }.joinToString("+")
+        val ctrlScope = plan.meta.scopeTag.name
+        val ctrlHint = plan.dispatch.scopeHint.ifEmpty { listOf("-") }.joinToString("+")
         val userMsg = """
             |[ControlToken Begin]
             |granularity=$ctrlGran
@@ -128,11 +128,12 @@ fun main(args: Array<String>) {
         loraFile.appendLine(schemaJson.encodeToString(LoraMessageRow.serializer(), msgRow))
     }
 
-    loraFile.close(); planFile.close(); promptFile.close(); qualityReport.close()
+    loraFile.close(); planFile.close(); promptFile.close()
+    File(opts.outDir, "quality-report.csv").writeText(qualityReport.toString())
 
     // ---------- Step 4: Meta 报告 ----------
-    val scopeBuckets = pairs.groupingBy { it.second.meta.dispatch.scope }.eachCount()
-    val granBuckets = pairs.groupingBy { it.second.meta.echoGranularity }.eachCount()
+    val scopeBuckets: Map<ScopeTag, Int> = pairs.groupingBy { it.second.meta.scopeTag }.eachCount()
+    val granBuckets: Map<Granularity, Int> = pairs.groupingBy { it.second.meta.echoGranularity }.eachCount()
     val meta = LoraMeta(
         n = opts.n,
         webRatio = opts.webRatio,

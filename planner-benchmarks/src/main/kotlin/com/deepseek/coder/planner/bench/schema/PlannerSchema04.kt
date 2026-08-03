@@ -61,6 +61,12 @@ data class PlannerOutput(
 data class Meta(
     @SerialName("output_version")
     val outputVersion: String = "0.4",
+    /** 合成数据唯一 ID，质检/复现用 */
+    @SerialName("request_id")
+    val requestId: String = "",
+    /** 语言偏好：zh-CN / en-US，双语 pair 一致性 Q10 用 */
+    @SerialName("language_tag")
+    val languageTag: String = "zh-CN",
     @SerialName("echo_granularity")
     val echoGranularity: Granularity,
     @SerialName("echo_planning_level")

@@ -5,6 +5,7 @@ import com.deepseek.coder.planner.bench.quality.PipelineResult
 import com.deepseek.coder.planner.bench.quality.QualityGatePipeline
 import com.deepseek.coder.planner.bench.schema.*
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
@@ -36,8 +37,8 @@ fun main(args: Array<String>) = runBlocking {
     }
 
     // F1 Case 采样（取前 n 条）
-    val f1All = F1DecisionQualityBenchmark.sampleCases()
-    val cases = f1All.take(opts.nCases)
+    val f1All = F1DecisionQualityBenchmark.defaultSampleCases()
+    val cases: List<F1Case> = f1All.take(opts.nCases)
 
     val systemPrompt = """
         |You are DeepCoder Planner v0.4. Output strictly valid JSON conforming to PlannerOutput Schema 0.4.

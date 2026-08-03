@@ -72,7 +72,7 @@ class SyntheticPipeline(private val pipeline: QualityGatePipeline) {
         scope: ScopeTag,
         granularity: Granularity
     ): Pair<String, PlannerOutput> {
-        val plan = buildValidPlan(prompt, scope, granularity)
+        val plan = buildValidPlan(id, prompt, scope, granularity)
         val json = schemaJson.encodeToString(PlannerOutput.serializer(), plan)
         val check = pipeline.runAll(
             jsonString = json,
@@ -85,7 +85,7 @@ class SyntheticPipeline(private val pipeline: QualityGatePipeline) {
         check(check.passed) {
             "合成失败 id=$id: ${check.summary()}"
         }
-        return id to plan
+        return prompt to plan
     }
 
     private fun scopeHintsFor(scope: ScopeTag): List<String> = when (scope) {
@@ -95,6 +95,7 @@ class SyntheticPipeline(private val pipeline: QualityGatePipeline) {
     }
 
     private fun buildValidPlan(
+        id: String,
         prompt: String,
         scope: ScopeTag,
         g: Granularity
@@ -144,6 +145,8 @@ class SyntheticPipeline(private val pipeline: QualityGatePipeline) {
         return PlannerOutput(
             meta = Meta(
                 outputVersion = "0.4",
+                requestId = id,
+                languageTag = "zh-CN",
                 echoGranularity = g,
                 echoPlanningLevel = PlanningLevel.MILESTONE,
                 echoControl = ControlType.NORMAL,
