@@ -1,5 +1,61 @@
 # DeepCoder 发布记录
 
+## v1.3.0 (2026-08-03) · 警察层 v2.0 上线：1 路由警察 + 12 专家池 + 自适应动态组队
+
+### 重大架构升级
+- 🚔 **警察层 v2.0 全量接入 Orchestrator**：用 prompt 工程模拟训练后小模型的优点，不训练任何模型，纯靠三层确定性蒸馏 + 层级反馈实现有秩序的问答流程管理
+- 架构：**1 个路由警察 + 12 个专家池 + 自适应动态组队**（按问题种类动态组建 2~4 人临时专家组）
+- 层级反馈链路：路由警察 → 组长 → 组员专家，专家可反馈组长，组长可升级回路由警察
+- 核心原则：**只决策不执行**。警察/专家只输出 JSON 决策，代码生成仍走 Actor（ChatRepository.sendChat 流式）
+
+### Orchestrator 6 节点 FSM 全部接入警察层
+- CLASSIFY        → DispatcherPolice.dispatch()       路由警察 two-stage（意图 + 动态组队 + 指定组长）
+- CLARIFY_QUESTION→ ExpertRunner.runClarify()         CLARIFY 专家生成澄清问题
+- GOVERN_CONTEXT  → ContextGovernor.trim()            L1 硬 token 预算
+- DECOMPOSE       → TeamLead.plan()                   组长 two-stage 制定执行计划
+- EXECUTE         → ExpertRunner.run() + Actor 流式   专家决策 capability → Actor 生成代码
+- SELF_CHECK      → ExpertRunner.runCheck()           CHECK 专家 + L1 决策矩阵硬覆盖
+
+### 新增组件（data/police/，8 个文件）
+- PoliceSchemas    统一 Schema + 枚举白名单 + L1 校验 + JSON 三层 repair（L1 直接 parse → L2 抽 {...} → L3 失败重试）
+- PolicePrompts    路由/组长/12 专家 system prompt（L2 prompt 层）
+- GuardRails       高危词硬拦截 + 软磨硬泡检测（L1 硬规则，仅高危词硬拦截，其余走路由判定 + 软拒引导）
+- EscalationTracker 升级计数（≥3 强制 BLOCKED）+ attempted_approaches 去重（相似度 >0.8 强制换思路）+ 多轮状态注入
+- PoliceClient     JSON-mode 调用 + two-stage + 三层 repair（v4-flash 非思考模式，temperature=0.05）
+- ExpertRunner     12 专家统一调度 + CHECK 决策矩阵硬覆盖（attempts≥3 强制 BLOCKED / RETRY+test_failure/timeout/logic_error 强制 REWORK / 去重强制 REWORK）
+- TeamLead         组长 two-stage 计划（粒度→步数映射 COARSE 2-3 / MEDIUM 5-7 / FINE 10-15）+ 升级判断
+- DispatcherPolice 路由警察 two-stage（Stage1 意图/难度/范围/澄清/拒答 → Stage2 动态组队）+ GENERAL_CHAT 不组队直接拒答 + NEEDS_CLARIFICATION 强制 CLARIFY
+
+### three-stage 蒸馏
+- L1 硬规则层（运行时强约束）：GuardRails 硬拦截 / EscalationTracker 升级计数 / CHECK 决策矩阵 / 步数区间校验 / JSON 三层 repair
+- L2 prompt 层（system prompt 指令）：路由/组长/12 专家各自 system prompt
+- L3 few-shot 层（示例引导）：组队示例、粒度映射、决策矩阵
+
+### 端到端真实 API 测试（7/7 全通过，耗时 21.8s）
+- S1 代码生成全链路（路由→组队→计划→GEN→Actor→CHECK DONE）
+- S2 闲聊拒答（GENERAL_CHAT + 引导话术）
+- S3 澄清流程（NEEDS_CLARIFICATION + CLARIFY 专家 3 问题）
+- S4 高危词硬拦截（L1 硬规则，不调 API）
+- S5 软磨硬泡（历史拒答维持 GENERAL_CHAT，未妥协）
+- S6 复杂任务组队（DESIGN_ARCH/hard → 4 人组队 ARCH 组长）
+- S7 自检 L1 决策矩阵（attempts>=3 强制 BLOCKED，覆盖模型原始判定）
+- 测试脚本：scripts/police_e2e_test.py（复用项目 prompt 常量，模拟完整 FSM）
+
+### 规格文档
+- SPEC-Police-v1.0.md（内容为 v2.0）：警察层规格书，定义架构/设计原则/详细规格/验收标准
+
+### APK
+- Debug: releases/DeepCoder-v1.3.0-debug.apk (~20 MB)
+- versionCode: 2 / versionName: 1.3.0
+
+### 验证
+- compileDebugKotlin：0 error（仅 4 个既有 deprecation 警告）
+- assembleDebug：BUILD SUCCESSFUL
+- testDebugUnitTest：全部通过，无回归
+- 端到端真实 API 测试：7/7 PASS
+
+---
+
 ## v1.2.0 (2026-08-03) · 丢弃 LoRA 训练计划，回归纯通用大模型 + Orchestrator
 
 ### 重大决策
