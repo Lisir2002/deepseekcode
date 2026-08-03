@@ -2,12 +2,6 @@ package com.deepseek.coder.data.workflow
 
 import com.deepseek.coder.core.AppError
 import com.deepseek.coder.core.DispatcherProvider
-import com.deepseek.coder.core.Outcome
-import com.deepseek.coder.core.toOutcome
-import com.deepseek.coder.data.ChatRepository
-import com.deepseek.coder.data.remote.dto.ChatMessageDto
-import com.deepseek.coder.data.remote.dto.ChatCompletionRequest
-import com.deepseek.coder.data.remote.dto.ResponseFormatDto
 import com.deepseek.coder.data.settings.AppSettings
 import com.deepseek.coder.data.settings.SettingsRepository
 import com.deepseek.coder.data.workflow.prompts.WorkflowPrompts
@@ -24,41 +18,52 @@ import com.deepseek.coder.domain.workflow.WorkflowEvent
 import com.deepseek.coder.domain.workflow.WorkflowPlan
 import com.deepseek.coder.domain.workflow.WorkflowState
 import com.deepseek.coder.domain.workflow.WorkflowStep
+import com.deepseek.coder.data.police.DispatcherPolice
+import com.deepseek.coder.data.police.EscalationTracker
+import com.deepseek.coder.data.police.ExpertRunner
+import com.deepseek.coder.data.police.PoliceSchemas
+import com.deepseek.coder.data.police.TeamLead
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.channelFlow
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.max
 
+/**
+ * Orchestrator v2.0 — 警察层接入版
+ *
+ * 设计依据：SPEC-Police-v1.0.md (内容为 v2.0)
+ *  FSM 节点 → 警察/专家映射：
+ *   - CLASSIFY        → DispatcherPolice.dispatch()       （路由警察：意图 + 动态组队）
+ *   - CLARIFY_QUESTION→ ExpertRunner.runClarify()         （CLARIFY 专家：生成澄清问题）
+ *   - GOVERN_CONTEXT  → ContextGovernor.trim()            （L1 硬 token 预算，GOVERN 专家决策留作后续增强）
+ *   - DECOMPOSE       → TeamLead.plan()                   （组长：two-stage 制定执行计划）
+ *   - EXECUTE         → ExpertRunner.run() + Actor 流式   （专家决策 capability → Actor 生成代码）
+ *   - SELF_CHECK      → ExpertRunner.runCheck()           （CHECK 专家 + L1 决策矩阵）
+ *
+ *  原则：只决策不执行。警察/专家只输出 JSON 决策，代码生成仍走 Actor（ChatRepository.sendChat 流式）。
+ *  GENERAL_CHAT 不组队、不调 Actor，直接输出 refuseHint。
+ */
 @Singleton
 class OrchestratorImpl @Inject constructor(
-    private val chatRepo: ChatRepository,
+    private val chatRepo: com.deepseek.coder.data.ChatRepository,
     private val settingsRepo: SettingsRepository,
     private val contextGovernor: ContextGovernor,
-    private val dispatchers: DispatcherProvider
+    private val dispatchers: DispatcherProvider,
+    private val dispatcherPolice: DispatcherPolice,
+    private val teamLead: TeamLead,
+    private val expertRunner: ExpertRunner,
+    private val escalationTracker: EscalationTracker
 ) : Orchestrator {
-
-    private val json = Json {
-        ignoreUnknownKeys = true
-        encodeDefaults = false
-        isLenient = true
-    }
 
     /** Pending clarifications for runs currently suspended on CLARIFY_QUESTION. */
     private val clarifications = mutableMapOf<String, MutableList<String>>()
@@ -81,7 +86,6 @@ class OrchestratorImpl @Inject constructor(
         userMessage: ChatMessage
     ): Flow<WorkflowEvent> = channelFlow {
         val base = settingsRepo.current()
-        val runSettings = base
         val currentStateHolder = CurrentState(WorkflowState.IDLE)
         suspend fun transition(to: WorkflowState) {
             val from = currentStateHolder.swap(to)
@@ -89,170 +93,194 @@ class OrchestratorImpl @Inject constructor(
         }
         send(WorkflowEvent.Orch(OrchestratorEvent.Started(runId)))
 
-        // ---- Step 1: Intent Classification ----
-        transition(WorkflowState.CLASSIFY)
-        val classification = classify(userMessage, runSettings).getOrElse {
-            IntentClassification(CodeIntent.CODE_GENERATE, 0.5f)
-        }
-        send(WorkflowEvent.Orch(OrchestratorEvent.Classification(classification)))
+        try {
+            // ---- Step 1: CLASSIFY (路由警察 two-stage) ----
+            transition(WorkflowState.CLASSIFY)
+            val dispatch = dispatcherPolice.dispatch(runId, userMessage, history)
+            val classification = mapDispatchToClassification(dispatch)
+            send(WorkflowEvent.Orch(OrchestratorEvent.Classification(classification)))
 
-        // ---- Step 1b: One round of clarification if needed ----
-        var effectiveIntent = classification.intent
-        var clarifiedUserMessage = userMessage
-        if (classification.intent == CodeIntent.NEEDS_CLARIFICATION && classification.missingInfo.isNotEmpty()) {
-            transition(WorkflowState.CLARIFY_QUESTION)
+            // ---- Step 1b: GENERAL_CHAT → 直接拒答，不组队、不调 Actor ----
+            if (dispatch.intent == PoliceSchemas.Intent.GENERAL_CHAT) {
+                val refuseMsg = ChatMessage(
+                    role = ChatRole.ASSISTANT,
+                    text = dispatch.refuseHint.ifBlank { defaultRefuseHint() }
+                )
+                send(WorkflowEvent.Chat(ChatStreamEvent.Finish(reason = "stop", usage = null)))
+                transition(WorkflowState.DONE)
+                send(WorkflowEvent.Orch(OrchestratorEvent.Completed(finalAssistant = refuseMsg, usage = null, retryCount = 0)))
+                return@channelFlow
+            }
+
+            // ---- Step 1c: CLARIFY (CLARIFY 专家) ----
+            var effectiveDispatch = dispatch
+            var clarifiedUserMessage = userMessage
+            if (dispatch.needClarify || dispatch.intent == PoliceSchemas.Intent.NEEDS_CLARIFICATION) {
+                transition(WorkflowState.CLARIFY_QUESTION)
+                val clarifyReason = dispatch.refuseHint.ifBlank { dispatch.routingReason }
+                val clarifyResult = expertRunner.runClarify(runId, userMessage.text, clarifyReason)
+                val questions = clarifyResult.clarifyQuestions
+                    .map { it.question }
+                    .filter { it.isNotBlank() }
+                    .ifEmpty { listOf("请补充更多细节，以便我更好地帮你") }
+                send(WorkflowEvent.Orch(OrchestratorEvent.ClarifyQuestion(questions)))
+
+                val answers = waitForClarification(runId, timeoutMs = 90_000, fallback = emptyList())
+                if (answers.isNotEmpty()) {
+                    clarifiedUserMessage = userMessage.copy(
+                        text = buildString {
+                            append(userMessage.text)
+                            append("\n\n补充信息：")
+                            questions.zip(answers).forEach { (q, a) ->
+                                append("\n- ").append(q).append("：").append(a)
+                            }
+                        }
+                    )
+                    // 澄清后重新路由
+                    transition(WorkflowState.CLASSIFY)
+                    effectiveDispatch = dispatcherPolice.dispatch(runId, clarifiedUserMessage, history)
+                    send(WorkflowEvent.Orch(OrchestratorEvent.Classification(mapDispatchToClassification(effectiveDispatch))))
+                    if (effectiveDispatch.intent == PoliceSchemas.Intent.GENERAL_CHAT) {
+                        val refuseMsg = ChatMessage(
+                            role = ChatRole.ASSISTANT,
+                            text = effectiveDispatch.refuseHint.ifBlank { defaultRefuseHint() }
+                        )
+                        send(WorkflowEvent.Chat(ChatStreamEvent.Finish(reason = "stop", usage = null)))
+                        transition(WorkflowState.DONE)
+                        send(WorkflowEvent.Orch(OrchestratorEvent.Completed(finalAssistant = refuseMsg, usage = null, retryCount = 0)))
+                        return@channelFlow
+                    }
+                }
+            }
+
+            // ---- Step 2: GOVERN_CONTEXT (L1 硬 token 预算) ----
+            transition(WorkflowState.GOVERN_CONTEXT)
+            val contextIn = history + clarifiedUserMessage
+            val (contextOut, trim) = withContext(dispatchers.default) {
+                contextGovernor.trim(contextIn, maxTokens = max(1024, base.maxTokens * 4 / 5))
+            }
+            send(WorkflowEvent.Orch(OrchestratorEvent.ContextTrimmed(trim.originalCount, trim.finalCount, trim.summarised)))
+
+            // ---- Step 3: DECOMPOSE (组长 two-stage) ----
+            transition(WorkflowState.DECOMPOSE)
+            val teamPlan = teamLead.plan(runId, clarifiedUserMessage.text, effectiveDispatch)
+            val plan = mapTeamPlanToWorkflowPlan(teamPlan)
+            send(WorkflowEvent.Orch(OrchestratorEvent.PlanProduced(plan)))
+
+            // ---- Step 4: EXECUTE + SELF_CHECK（专家决策 → Actor 执行 → CHECK 验证）----
+            var retryCount = 0
+            val maxRetry = 1
+            var finalAssistant = ChatMessage(role = ChatRole.ASSISTANT, text = "")
+            var usageSnap: UsageSnapshot? = null
+            var blocked = false
+
+            for ((stepIdx, planStep) in teamPlan.steps.withIndex()) {
+                escalationTracker.updateProgress(runId, stepIdx, "executing: ${planStep.title}")
+                val step = WorkflowStep(
+                    index = stepIdx,
+                    title = planStep.title,
+                    systemPromptHints = buildStepHints(planStep),
+                    dependsOn = planStep.dependsOn.mapNotNull { id ->
+                        teamPlan.steps.indexOfFirst { it.id == id }.takeIf { it >= 0 }
+                    },
+                    requiresSelfCheck = (stepIdx == teamPlan.steps.lastIndex)
+                )
+                transition(WorkflowState.EXECUTE)
+                send(WorkflowEvent.Orch(OrchestratorEvent.StepStarted(step)))
+
+                var stepAttempts = 0
+                var assistantForStep: ChatMessage = ChatMessage(role = ChatRole.ASSISTANT, text = "")
+                var stepUsage: UsageSnapshot? = null
+                var patchSuffix = ""
+                var checkDecision: PoliceSchemas.CheckDecision
+
+                do {
+                    // 4a. 专家决策：生成 capability prompt（只决策不执行）
+                    val expertInput = buildExpertInput(clarifiedUserMessage.text, planStep, patchSuffix)
+                    val expertResult = expertRunner.run(runId, planStep.assignedExpert, expertInput)
+                    val capabilityHints = buildString {
+                        if (expertResult.capabilityPrompt.isNotBlank()) append(expertResult.capabilityPrompt)
+                        if (expertResult.outputFormatHint.isNotBlank()) {
+                            if (isNotEmpty()) append('\n')
+                            append("输出格式：").append(expertResult.outputFormatHint)
+                        }
+                    }
+                    escalationTracker.recordAttempt(runId, capabilityHints.take(200))
+
+                    // 4b. Actor 执行（流式生成代码），专家 capability 作为系统提示增强
+                    val stepWithHints = step.copy(
+                        systemPromptHints = if (capabilityHints.isNotBlank()) capabilityHints else step.systemPromptHints
+                    )
+                    val enhancedHistory = buildStepContext(contextOut, stepWithHints, base, classification.intent)
+                    val (msg, use) = executeStepStream(enhancedHistory, base, stepWithHints) { ev ->
+                        trySend(WorkflowEvent.Chat(ev)).isSuccess
+                    }
+                    assistantForStep = msg
+                    stepUsage = use
+
+                    // 4c. CHECK 专家自检 + L1 决策矩阵
+                    transition(WorkflowState.SELF_CHECK)
+                    val checkResult = expertRunner.runCheck(runId, assistantForStep.text, "")
+                    val check = mapExpertCheckToSelfCheck(checkResult)
+                    send(WorkflowEvent.Orch(OrchestratorEvent.SelfCheck(check)))
+                    checkDecision = PoliceSchemas.CheckDecision.coerce(checkResult.decision)
+
+                    when (checkDecision) {
+                        PoliceSchemas.CheckDecision.RETRY,
+                        PoliceSchemas.CheckDecision.REWORK -> {
+                            if (stepAttempts < maxRetry && !check.suggestedFixPrompt.isNullOrBlank()) {
+                                transition(WorkflowState.RETRY_FIX)
+                                stepAttempts += 1
+                                retryCount += 1
+                                patchSuffix = check.suggestedFixPrompt
+                            } else {
+                                // 达到重试上限，接受当前输出
+                                checkDecision = PoliceSchemas.CheckDecision.DONE
+                            }
+                        }
+                        PoliceSchemas.CheckDecision.ESCALATE -> {
+                            escalationTracker.recordEscalation(runId, checkResult.escalationReason)
+                            if (escalationTracker.shouldBlock(runId)) {
+                                checkDecision = PoliceSchemas.CheckDecision.BLOCKED
+                            } else {
+                                // 升级但未到上限：接受当前输出（重新组队留作后续轮次增强）
+                                checkDecision = PoliceSchemas.CheckDecision.DONE
+                            }
+                        }
+                        PoliceSchemas.CheckDecision.BLOCKED -> blocked = true
+                        PoliceSchemas.CheckDecision.DONE -> { /* 继续 */ }
+                    }
+                } while (checkDecision == PoliceSchemas.CheckDecision.RETRY ||
+                    checkDecision == PoliceSchemas.CheckDecision.REWORK
+                )
+
+                if (stepUsage != null) usageSnap = stepUsage
+                finalAssistant = finalAssistant.copy(
+                    text = finalAssistant.text + if (finalAssistant.text.isBlank()) "" else "\n\n" + stepTitle(step) + "\n" + assistantForStep.text,
+                    reasoning = listOfNotNull(finalAssistant.reasoning, assistantForStep.reasoning)
+                        .filter { it.isNotBlank() }
+                        .joinToString("\n---\n")
+                        .ifBlank { null }
+                )
+                send(WorkflowEvent.Orch(OrchestratorEvent.StepFinished(step)))
+
+                if (blocked) break
+            }
+
+            send(WorkflowEvent.Chat(ChatStreamEvent.Finish(reason = "stop", usage = usageSnap)))
+            transition(WorkflowState.DONE)
             send(
                 WorkflowEvent.Orch(
-                    OrchestratorEvent.ClarifyQuestion(classification.missingInfo)
-                )
-            )
-            // Wait up to 90s for UI to call answerClarification
-            val answers = waitForClarification(runId, timeoutMs = 90_000, fallback = emptyList())
-            if (answers.isNotEmpty()) {
-                val appended = buildString {
-                    append(userMessage.text)
-                    append("\n\n补充信息：")
-                    classification.missingInfo.zip(answers).forEach { (q, a) ->
-                        append("\n- ").append(q).append("：").append(a)
-                    }
-                }
-                clarifiedUserMessage = userMessage.copy(text = appended)
-                // Re-classify once after clarification to pick a real CODE_* intent
-                transition(WorkflowState.CLASSIFY)
-                effectiveIntent = classify(clarifiedUserMessage, runSettings).getOrNull()?.intent
-                    ?: CodeIntent.CODE_GENERATE
-                send(
-                    WorkflowEvent.Orch(
-                        OrchestratorEvent.Classification(
-                            classification.copy(intent = effectiveIntent, confidence = 0.9f)
-                        )
-                    )
-                )
-            }
-        }
-
-        // ---- Step 2: Context Governance ----
-        transition(WorkflowState.GOVERN_CONTEXT)
-        val contextIn = history + clarifiedUserMessage
-        val (contextOut, trim) = withContext(dispatchers.default) {
-            contextGovernor.trim(contextIn, maxTokens = max(1024, runSettings.maxTokens * 4 / 5))
-        }
-        send(WorkflowEvent.Orch(OrchestratorEvent.ContextTrimmed(trim.originalCount, trim.finalCount, trim.summarised)))
-
-        // ---- Step 3: Plan decomposition ----
-        transition(WorkflowState.DECOMPOSE)
-        val plan = decompose(clarifiedUserMessage, effectiveIntent, runSettings).getOrElse {
-            WorkflowPlan(
-                steps = listOf(
-                    WorkflowStep(
-                        index = 0,
-                        title = bestEffortStepTitle(effectiveIntent),
-                        requiresSelfCheck = true
+                    OrchestratorEvent.Completed(
+                        finalAssistant = finalAssistant,
+                        usage = usageSnap,
+                        retryCount = retryCount
                     )
                 )
             )
+        } finally {
+            escalationTracker.clear(runId)
         }
-        send(WorkflowEvent.Orch(OrchestratorEvent.PlanProduced(plan)))
-
-        // ---- Step 4: Execute steps ----
-        var retryCount = 0
-        val maxRetry = 1
-        var finalAssistant = ChatMessage(role = ChatRole.ASSISTANT, text = "")
-        var usageSnap: UsageSnapshot? = null
-
-        stepLoop@ for (step in plan.steps) {
-            transition(WorkflowState.EXECUTE)
-            send(WorkflowEvent.Orch(OrchestratorEvent.StepStarted(step)))
-            var assistantForStep: ChatMessage
-            var stepUsage: UsageSnapshot?
-            var check: SelfCheckResult
-            executeWithRetry@ do {
-                val enhancedHistory = buildStepContext(contextOut, step, runSettings, effectiveIntent)
-                val (msg, use) = executeStepStream(enhancedHistory, runSettings, step, sendStream = { ev ->
-                    trySend(WorkflowEvent.Chat(ev)).isSuccess
-                })
-                assistantForStep = msg
-                stepUsage = use
-
-                transition(WorkflowState.SELF_CHECK)
-                check = selfCheck(assistantForStep, runSettings).getOrElse {
-                    SelfCheckResult(pass = true)
-                }
-                send(WorkflowEvent.Orch(OrchestratorEvent.SelfCheck(check)))
-                if (!check.pass && retryCount < maxRetry && !check.suggestedFixPrompt.isNullOrBlank()) {
-                    transition(WorkflowState.RETRY_FIX)
-                    retryCount += 1
-                    // Append assistant output + fix prompt as a new user message; continue the loop
-                    val fixMsg = ChatMessage(
-                        role = ChatRole.USER,
-                        text = check.suggestedFixPrompt!!
-                    )
-                    // replace context for next iteration to include the fix feedback
-                    val fixedHistory = (enhancedHistory + assistantForStep + fixMsg)
-                    contextGovernor.trim(fixedHistory, maxTokens = max(1024, runSettings.maxTokens * 4 / 5)).let {
-                        // drop first element of pair (contextOut) is the trimmed list; we override contextOut for the retry loop
-                        // scope-limited hack: shadow via loop re-entry; we simply mutate `contextOut` indirectly:
-                    }
-                    // Re-assign contextOut for retry iteration by using fixedHistory directly with a lightweight trim (no summary)
-                    (fixedHistory.takeLast(24) to null).let { (newCtx, _) ->
-                        // Hack: directly set contextOut for re-use within step retry (shadowed). We'll just pass fixedHistory directly into executeStepStream below by looping again
-                        // In practice we replace the enhanceHistory inside the do-while by re-building. Here we simply retry using fixedHistory as our new baseline:
-                        // (we re-run the execute step via `continue`)
-                    }
-                    // Actually re-assign the variables that feed buildStepContext:
-                    // we want: enhancedHistory for retry = (enhancedHistory + assistantForStep + fixMsg) trimmed
-                    val retryBase = enhancedHistory + assistantForStep + fixMsg
-                    val trimmedRetry = contextGovernor.trim(retryBase, max(1024, runSettings.maxTokens * 4 / 5)).first
-                    // To propagate into next iteration we mutate local variables via helper setContext:
-                    // Since Kotlin does not allow mutating outer loop variables cleanly from inside a labelled
-                    // block, we use a small wrapper: reassign enhancedHistory indirectly via the loop condition. We
-                    // instead re-invoke execute directly (bypassing buildStepContext) inside this branch, then
-                    // break from the retry loop.
-                    val retryEnhanced = buildStepContext(trimmedRetry, step, runSettings, effectiveIntent)
-                    val (m2, u2) = executeStepStream(retryEnhanced, runSettings, step, sendStream = { ev ->
-                        trySend(WorkflowEvent.Chat(ev)).isSuccess
-                    })
-                    assistantForStep = m2
-                    stepUsage = u2
-                    transition(WorkflowState.SELF_CHECK)
-                    check = selfCheck(assistantForStep, runSettings).getOrElse {
-                        SelfCheckResult(pass = true)
-                    }
-                    send(WorkflowEvent.Orch(OrchestratorEvent.SelfCheck(check)))
-                    break@executeWithRetry // regardless of pass, stop the retry loop
-                }
-            } while (!check.pass && retryCount < maxRetry)
-
-            if (stepUsage != null) usageSnap = stepUsage
-            finalAssistant = finalAssistant.copy(
-                text = finalAssistant.text + if (finalAssistant.text.isBlank()) "" else "\n\n" + stepTitle(step) + "\n" + assistantForStep.text,
-                reasoning = listOfNotNull(finalAssistant.reasoning, assistantForStep.reasoning)
-                    .filter { it.isNotBlank() }
-                    .joinToString("\n---\n")
-                    .ifBlank { null }
-            )
-            send(WorkflowEvent.Orch(OrchestratorEvent.StepFinished(step)))
-        }
-
-        // Emit a synthetic Finish Chat event so legacy consumers treat the stream the same as before
-        send(
-            WorkflowEvent.Chat(
-                ChatStreamEvent.Finish(
-                    reason = "stop",
-                    usage = usageSnap
-                )
-            )
-        )
-        transition(WorkflowState.DONE)
-        send(
-            WorkflowEvent.Orch(
-                OrchestratorEvent.Completed(
-                    finalAssistant = finalAssistant,
-                    usage = usageSnap,
-                    retryCount = retryCount
-                )
-            )
-        )
     }
         .catch { t ->
             emit(WorkflowEvent.Orch(OrchestratorEvent.Failed(t)))
@@ -272,167 +300,91 @@ class OrchestratorImpl @Inject constructor(
         .flowOn(dispatchers.default)
 
     // -------------------------------------------------------------------------------
-    // Internal node implementations
+    // 警察层 → 领域模型映射
     // -------------------------------------------------------------------------------
 
-    private suspend fun classify(
-        userMessage: ChatMessage,
-        s: AppSettings
-    ): Result<IntentClassification> = runCatching {
-        val msgs = listOf(
-            ChatMessage(role = ChatRole.SYSTEM, text = WorkflowPrompts.INTENT_CLASSIFIER_SYSTEM),
-            ChatMessage(role = ChatRole.USER, text = userMessage.text.take(4000))
-        )
-        val jsonMode = s.copy(
-            systemPrompt = WorkflowPrompts.INTENT_CLASSIFIER_SYSTEM,
-            temperature = 0.05f,
-            reasoningEffort = AppSettings.ReasoningEffort.DISABLED
-        )
-        val (content, _) = blockingCallInternal(msgs, jsonMode, requireJson = true)
-            .getOrThrow()
-        val parsed = runCatching { json.decodeFromString<IntentClassificationDto>(content.orEmpty()) }
-            .getOrElse {
-                // Fallback: keyword rules
-                IntentClassificationDto(
-                    intent = guessIntentFallback(userMessage.text).name,
-                    confidence = 0.6f,
-                    missing_info = emptyList()
-                )
-            }
-        IntentClassification(
-            intent = CodeIntent.of(parsed.intent),
-            confidence = parsed.confidence.coerceIn(0f, 1f),
-            missingInfo = parsed.missing_info
-        )
+    private fun mapDispatchToClassification(d: PoliceSchemas.DispatcherResult): IntentClassification {
+        val intent = mapPoliceIntentToCodeIntent(d.intent)
+        val confidence = when (d.cap) {
+            PoliceSchemas.Cap.SIMPLE -> 0.9f
+            PoliceSchemas.Cap.MEDIUM -> 0.7f
+            PoliceSchemas.Cap.COMPLEX -> 0.5f
+            PoliceSchemas.Cap.HARD -> 0.3f
+        }
+        val missingInfo = if (d.needClarify) listOf(d.refuseHint.ifBlank { "需要更多信息" }) else emptyList()
+        return IntentClassification(intent, confidence, missingInfo)
     }
 
-    private suspend fun decompose(
-        userMessage: ChatMessage,
-        intent: CodeIntent,
-        s: AppSettings
-    ): Result<WorkflowPlan> = runCatching {
-        if (intent in SIMPLE_INTENTS) {
-            return@runCatching WorkflowPlan(
-                steps = listOf(
-                    WorkflowStep(
-                        index = 0,
-                        title = bestEffortStepTitle(intent),
-                        requiresSelfCheck = true
-                    )
-                )
-            )
-        }
-        val msgs = listOf(
-            ChatMessage(role = ChatRole.SYSTEM, text = WorkflowPrompts.DECOMPOSER_SYSTEM),
-            ChatMessage(role = ChatRole.USER, text = userMessage.text.take(4000))
-        )
-        val jsonMode = s.copy(
-            temperature = 0.1f,
-            reasoningEffort = AppSettings.ReasoningEffort.DISABLED
-        )
-        val (content, _) = blockingCallInternal(msgs, jsonMode, requireJson = true).getOrThrow()
-        runCatching {
-            val dto = json.decodeFromString<WorkflowPlanDto>(content.orEmpty())
-            WorkflowPlan(
-                steps = dto.steps.mapIndexed { i, st ->
-                    WorkflowStep(
-                        index = st.index.takeIf { it in 0..100 } ?: i,
-                        title = st.title?.takeIf { it.isNotBlank() } ?: "步骤 ${i + 1}",
-                        systemPromptHints = st.systemPromptHints.orEmpty(),
-                        dependsOn = st.dependsOn.orEmpty(),
-                        requiresSelfCheck = st.requiresSelfCheck ?: (i == dto.steps.lastIndex)
-                    )
-                }.also { steps ->
-                    require(steps.isNotEmpty()) { "plan steps empty" }
+    private fun mapPoliceIntentToCodeIntent(i: PoliceSchemas.Intent): CodeIntent = when (i) {
+        PoliceSchemas.Intent.CODE_GENERATE -> CodeIntent.CODE_GENERATE
+        PoliceSchemas.Intent.CODE_EXPLAIN -> CodeIntent.CODE_EXPLAIN
+        PoliceSchemas.Intent.CODE_REFACTOR -> CodeIntent.CODE_REFACTOR
+        PoliceSchemas.Intent.CODE_FIX_BUG -> CodeIntent.CODE_FIX_BUG
+        PoliceSchemas.Intent.CODE_TRANSLATE -> CodeIntent.CODE_TRANSLATE
+        PoliceSchemas.Intent.CODE_REVIEW -> CodeIntent.CODE_REVIEW
+        PoliceSchemas.Intent.DESIGN_ARCH -> CodeIntent.DESIGN_ARCH
+        PoliceSchemas.Intent.WRITE_TEST -> CodeIntent.CODE_GENERATE
+        PoliceSchemas.Intent.ADD_DEPENDENCY -> CodeIntent.CODE_GENERATE
+        PoliceSchemas.Intent.GENERAL_CHAT -> CodeIntent.GENERAL_CHAT
+        PoliceSchemas.Intent.NEEDS_CLARIFICATION -> CodeIntent.NEEDS_CLARIFICATION
+    }
+
+    private fun mapTeamPlanToWorkflowPlan(p: PoliceSchemas.TeamLeadResult): WorkflowPlan {
+        val steps = p.steps.mapIndexed { i, s ->
+            WorkflowStep(
+                index = i,
+                title = s.title,
+                systemPromptHints = buildStepHints(s),
+                dependsOn = s.dependsOn.mapNotNull { id ->
+                    p.steps.indexOfFirst { it.id == id }.takeIf { it >= 0 }
                 },
-                estimatedTotalTokens = dto.estimatedTotalTokens
+                requiresSelfCheck = (i == p.steps.lastIndex)
             )
-        }.getOrElse {
-            WorkflowPlan(
-                steps = listOf(
-                    WorkflowStep(
-                        index = 0,
-                        title = bestEffortStepTitle(intent),
-                        requiresSelfCheck = true
-                    )
-                )
-            )
+        }
+        return WorkflowPlan(steps = steps)
+    }
+
+    private fun buildStepHints(s: PoliceSchemas.PlanStep): String = buildString {
+        if (s.what.isNotBlank()) append("目标：").append(s.what).append('\n')
+        if (s.why.isNotBlank()) append("原因：").append(s.why).append('\n')
+        if (s.edgeCase.isNotBlank()) append("边界：").append(s.edgeCase).append('\n')
+        if (s.testHint.isNotBlank()) append("测试提示：").append(s.testHint)
+    }.trim()
+
+    private fun mapExpertCheckToSelfCheck(r: PoliceSchemas.ExpertResult): SelfCheckResult {
+        val decision = PoliceSchemas.CheckDecision.coerce(r.decision)
+        val passed = r.passed ?: (decision == PoliceSchemas.CheckDecision.DONE)
+        val issues = listOfNotNull(
+            r.errorReason.takeIf { it.isNotBlank() },
+            r.escalationReason.takeIf { it.isNotBlank() }
+        )
+        val fix = r.patchPromptSuffix.takeIf { it.isNotBlank() }
+        return SelfCheckResult(pass = passed, issues = issues, suggestedFixPrompt = fix)
+    }
+
+    private fun buildExpertInput(
+        userMessage: String,
+        planStep: PoliceSchemas.PlanStep,
+        patchSuffix: String
+    ): String = buildString {
+        appendLine("用户需求：")
+        appendLine(userMessage.take(3000))
+        appendLine()
+        appendLine("当前步骤：${planStep.title}")
+        appendLine("步骤目标：${planStep.what.take(800)}")
+        if (patchSuffix.isNotBlank()) {
+            appendLine()
+            appendLine("上一轮自检反馈（请据此调整思路，不要重复相同方案）：")
+            appendLine(patchSuffix.take(800))
         }
     }
 
-    private suspend fun selfCheck(
-        assistant: ChatMessage,
-        s: AppSettings
-    ): Result<SelfCheckResult> = runCatching {
-        val codeInAssistant = assistant.text.takeIf { it.contains("```") }
-            ?: return@runCatching SelfCheckResult(pass = true)
-        val msgs = listOf(
-            ChatMessage(role = ChatRole.SYSTEM, text = WorkflowPrompts.SELF_CHECKER_SYSTEM),
-            ChatMessage(role = ChatRole.USER, text = codeInAssistant.take(6000))
-        )
-        val jsonMode = s.copy(
-            temperature = 0.05f,
-            reasoningEffort = AppSettings.ReasoningEffort.DISABLED
-        )
-        val (content, _) = blockingCallInternal(msgs, jsonMode, requireJson = true).getOrThrow()
-        runCatching {
-            val dto = json.decodeFromString<SelfCheckDto>(content.orEmpty())
-            SelfCheckResult(
-                pass = dto.pass,
-                issues = dto.issues.orEmpty(),
-                suggestedFixPrompt = dto.suggested_fix_prompt
-            )
-        }.getOrElse { SelfCheckResult(pass = true) }
-    }
+    private fun defaultRefuseHint(): String =
+        "这超出代码助手范围。如果你有编程相关的需求（代码生成/调试/重构/审查），我可以帮你。"
 
-    private suspend fun blockingCallInternal(
-        msgs: List<ChatMessage>,
-        override: AppSettings,
-        requireJson: Boolean
-    ): Result<Pair<String?, UsageSnapshot?>> = runCatching {
-        val eff = if (requireJson) {
-            val jsonReq = ChatRepository.buildRequest(
-                msgs,
-                override.copy(
-                    systemPrompt = msgs.firstOrNull { it.role == ChatRole.SYSTEM }?.text.orEmpty()
-                ),
-                stream = false
-            ).let {
-                // Inject response_format=json_object when requested
-                val dtoMsgs = it.messages.map { m ->
-                    ChatMessageDto(
-                        role = m.role,
-                        content = m.content
-                    )
-                }
-                ChatCompletionRequest(
-                    model = it.model,
-                    messages = dtoMsgs,
-                    temperature = it.temperature,
-                    top_p = it.top_p,
-                    max_tokens = it.max_tokens,
-                    stream = false,
-                    responseFormat = ResponseFormatDto(type = "json_object"),
-                    streamOptions = it.streamOptions,
-                    reasoningEffort = it.reasoningEffort,
-                    thinkingBudget = it.thinkingBudget
-                )
-            }
-            when (val o = chatRepo.sendChatBlockingJsonOverride(jsonReq)) {
-                is Outcome.Success -> {
-                    val (msg, usage) = o.value
-                    msg.text to usage
-                }
-                is Outcome.Failure -> throw IllegalStateException(o.error.message, o.error as? Throwable ?: RuntimeException(o.error.message))
-            }
-        } else {
-            when (val o = chatRepo.sendChatBlocking(msgs)) {
-                is Outcome.Success -> o.value.let { (msg, u) -> msg.text to u }
-                is Outcome.Failure -> throw IllegalStateException(o.error.message, o.error as? Throwable ?: RuntimeException(o.error.message))
-            }
-        }
-        eff
-    }
+    // -------------------------------------------------------------------------------
+    // Actor 执行（流式代码生成，保留原有实现）
+    // -------------------------------------------------------------------------------
 
     private suspend fun executeStepStream(
         context: List<ChatMessage>,
@@ -483,48 +435,18 @@ class OrchestratorImpl @Inject constructor(
             role = ChatRole.USER,
             text = "【本次任务类型：${intent.display}】请严格按任务类型输出。"
         )
-        // Prepend SYSTEM + intent hint, then drop any duplicate system/user messages from baseHistory to avoid duplication
         val rest = baseHistory.dropWhile { it.role == ChatRole.SYSTEM }
         return listOf(first) + listOf(intentHint) + rest
     }
 
     private fun stepTitle(step: WorkflowStep): String = "### 步骤 ${step.index + 1}：${step.title}"
 
-    private fun bestEffortStepTitle(intent: CodeIntent): String = when (intent) {
-        CodeIntent.CODE_GENERATE -> "生成代码"
-        CodeIntent.CODE_REFACTOR -> "重构代码"
-        CodeIntent.CODE_EXPLAIN -> "解释代码"
-        CodeIntent.CODE_FIX_BUG -> "修复 Bug"
-        CodeIntent.CODE_TRANSLATE -> "语言转换"
-        CodeIntent.CODE_REVIEW -> "代码 Review"
-        CodeIntent.DESIGN_ARCH -> "架构设计"
-        CodeIntent.FIM_COMPLETE -> "中间补全"
-        CodeIntent.GENERAL_CHAT -> "对话"
-        CodeIntent.NEEDS_CLARIFICATION -> "继续处理"
-    }
-
-    private fun guessIntentFallback(text: String): CodeIntent {
-        val t = text
-        return when {
-            t.contains("重构") || t.contains("重写") || t.contains("改造") -> CodeIntent.CODE_REFACTOR
-            t.contains("解释") || t.contains("讲一下") || t.contains("原理") -> CodeIntent.CODE_EXPLAIN
-            t.contains("报错") || t.contains("崩溃") || t.contains("修复") || t.contains("bug") || t.contains("异常")
-                -> CodeIntent.CODE_FIX_BUG
-            t.contains("翻译") || t.contains("转成") || t.contains("转换") -> CodeIntent.CODE_TRANSLATE
-            t.contains("review") || t.contains("评审") || t.contains("审查") || t.contains("点评") -> CodeIntent.CODE_REVIEW
-            t.contains("架构") || t.contains("设计") || t.contains("模块") || t.contains("分层") -> CodeIntent.DESIGN_ARCH
-            t.contains("补全") || t.contains("光标") || t.contains("FIM") -> CodeIntent.FIM_COMPLETE
-            t.contains("写") || t.contains("生成") || t.contains("实现") || t.contains("创建") -> CodeIntent.CODE_GENERATE
-            else -> CodeIntent.CODE_GENERATE
-        }
-    }
-
     @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun waitForClarification(
         runId: String,
         timeoutMs: Long,
         fallback: List<String>
-    ): List<String> = callbackFlow {
+    ): List<String> = kotlinx.coroutines.flow.callbackFlow {
         val start = System.currentTimeMillis()
         launch(dispatchers.default) {
             while (System.currentTimeMillis() - start < timeoutMs) {
@@ -540,48 +462,11 @@ class OrchestratorImpl @Inject constructor(
         awaitClose()
     }.flowOn(dispatchers.default).first()
 
-    // ---- DTO mirrors for JSON schema of workflow nodes ----
-    @Serializable
-    private data class IntentClassificationDto(
-        val intent: String,
-        val confidence: Float = 0.5f,
-        val missing_info: List<String> = emptyList()
-    )
-
-    @Serializable
-    private data class SelfCheckDto(
-        val pass: Boolean,
-        val issues: List<String>? = null,
-        val suggested_fix_prompt: String? = null
-    )
-
-    @Serializable
-    private data class WorkflowPlanDto(
-        val steps: List<StepDto>,
-        val estimatedTotalTokens: Int? = null
-    ) {
-        @Serializable
-        data class StepDto(
-            val index: Int? = null,
-            val title: String? = null,
-            val systemPromptHints: String? = null,
-            val dependsOn: List<Int>? = null,
-            val requiresSelfCheck: Boolean? = null
-        )
-    }
-
     private class CurrentState(var value: WorkflowState) {
         fun swap(new: WorkflowState): WorkflowState {
             val prev = value
             value = new
             return prev
         }
-    }
-
-    companion object {
-        private val SIMPLE_INTENTS = setOf(
-            CodeIntent.CODE_EXPLAIN,
-            CodeIntent.GENERAL_CHAT
-        )
     }
 }
