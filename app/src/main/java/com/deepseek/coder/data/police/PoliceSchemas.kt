@@ -4,12 +4,13 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /**
- * Police Layer v2.0 — 统一 Schemas + L1 运行时校验
+ * Police Layer v2.1 — 统一 Schemas + L1 运行时校验
  *
- * 设计依据：SPEC-Police-v1.0.md (内容为 v2.0) §3 / §4 / §5
- *  - 1 路由警察 + 12 专家池 + 自适应动态组队
- *  - 层级反馈：路由警察 → 组长 → 组员专家，可向上反馈/升级
+ * 设计依据：SPEC-Police-v2.1.md §3 / §4 / §5
+ *  - 1 路由警察 + 12 专家池 + 自适应动态组队 + 组长动态换人 + 升级重组队
+ *  - 层级反馈：路由警察 → 组长 → 组员专家，可向上反馈/升级（v2.1 真实接通）
  *  - 三层确定性蒸馏：L1 硬规则（本文件） / L2 prompt / L3 few-shot
+ *  - v2.1 修正：GEN 只出决策不写代码；GOVERN 决策+执行分离；CHECK 接 LLM 二次验证
  */
 object PoliceSchemas {
 
@@ -291,10 +292,16 @@ object PoliceSchemas {
     data class ExpertDto(
         val expert_id: String? = null,
         val decision: String? = null,
+        // v2.0 字段（保留向后兼容，GEN v2.1 不再使用 capability_prompt）
         val capability_prompt: String? = null,
         val output_format_hint: String? = null,
         val depends_on: List<String>? = null,
         val feedback_to_lead: String? = null,
+        // v2.1 GEN 决策字段（只决策不写代码）
+        val tech_stack: List<String>? = null,
+        val constraints: List<String>? = null,
+        val acceptance_criteria: List<String>? = null,
+        val risks: List<String>? = null,
         // CLARIFY 扩展
         val clarify_questions: List<ClarifyQuestionDto>? = null,
         val can_proceed_without: Boolean? = null,
@@ -331,6 +338,11 @@ object PoliceSchemas {
         val outputFormatHint: String,
         val dependsOn: List<String>,
         val feedbackToLead: String,
+        // v2.1 GEN 决策字段（只决策不写代码）
+        val techStack: List<String>,
+        val constraints: List<String>,
+        val acceptanceCriteria: List<String>,
+        val risks: List<String>,
         // CLARIFY
         val clarifyQuestions: List<ClarifyQuestion>,
         val canProceedWithout: Boolean,
@@ -552,6 +564,11 @@ object PoliceSchemas {
             outputFormatHint = (dto.output_format_hint ?: "").take(200),
             dependsOn = dto.depends_on?.filter { it.isNotBlank() } ?: emptyList(),
             feedbackToLead = (dto.feedback_to_lead ?: "").take(300),
+            // v2.1 GEN 决策字段
+            techStack = dto.tech_stack?.filter { it.isNotBlank() }?.take(10) ?: emptyList(),
+            constraints = dto.constraints?.filter { it.isNotBlank() }?.take(15) ?: emptyList(),
+            acceptanceCriteria = dto.acceptance_criteria?.filter { it.isNotBlank() }?.take(10) ?: emptyList(),
+            risks = dto.risks?.filter { it.isNotBlank() }?.take(8) ?: emptyList(),
             clarifyQuestions = clarifyQuestions,
             canProceedWithout = dto.can_proceed_without ?: true,
             proceedRisk = (dto.proceed_risk ?: "").take(160),
@@ -567,6 +584,105 @@ object PoliceSchemas {
             patchPromptSuffix = (dto.patch_prompt_suffix ?: "").take(500),
             escalationReason = (dto.escalation_reason ?: "").take(160),
             attemptedApproachesAppend = (dto.attempted_approaches_append ?: "").take(200)
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // v2.1 新增：LLM 二次验证 DTO（CHECK 节点激活决策矩阵）
+    // ------------------------------------------------------------------
+
+    /** LLM 二次验证输出（扮编译器/测试者，给出真实 error_type）。 */
+    @Serializable
+    data class LlmVerifyDto(
+        val error_type: String? = null,
+        val error_reason: String? = null,
+        val confidence_bucket: String? = null
+    )
+
+    /** LLM 验证结果（领域模型）。 */
+    data class LlmVerifyResult(
+        val errorType: ErrorType,
+        val errorReason: String,
+        val confidenceBucket: ConfidenceBucket
+    )
+
+    /** 验证置信度桶。 */
+    enum class ConfidenceBucket(val raw: String) {
+        HIGH("high"), MEDIUM("medium"), LOW("low");
+        companion object {
+            fun coerce(raw: String?): ConfidenceBucket {
+                val norm = raw?.trim()?.lowercase().orEmpty()
+                return entries.firstOrNull { it.raw == norm } ?: MEDIUM
+            }
+        }
+    }
+
+    /** 把 LlmVerifyDto L1 校验为 [LlmVerifyResult]。 */
+    fun buildLlmVerifyResult(dto: LlmVerifyDto): LlmVerifyResult = LlmVerifyResult(
+        errorType = ErrorType.coerce(dto.error_type),
+        errorReason = (dto.error_reason ?: "").take(200),
+        confidenceBucket = ConfidenceBucket.coerce(dto.confidence_bucket)
+    )
+
+    // ------------------------------------------------------------------
+    // v2.1 新增：组长动态换人 / 升级重组队 DTO
+    // ------------------------------------------------------------------
+
+    /** 组长换人决策输出。 */
+    @Serializable
+    data class SwapMemberDto(
+        val action: String? = null,           // SWAP_MEMBER / KEEP_TEAM
+        val remove_expert: String? = null,
+        val add_expert: String? = null,
+        val reason: String? = null
+    )
+
+    /** 换人结果（领域模型）。 */
+    data class SwapMemberResult(
+        val shouldSwap: Boolean,
+        val removeExpert: ExpertId?,
+        val addExpert: ExpertId?,
+        val reason: String
+    )
+
+    /** 路由警察重组队决策输出。 */
+    @Serializable
+    data class RedispatchDto(
+        val new_team: List<String>? = null,
+        val new_team_lead: String? = null,
+        val resume_from_step: String? = null,
+        val routing_reason: String? = null
+    )
+
+    /** 重组队结果（领域模型）。 */
+    data class RedispatchResult(
+        val newTeam: List<ExpertId>,
+        val newTeamLead: ExpertId,
+        val resumeFromStep: String,
+        val routingReason: String
+    )
+
+    /** 把 RedispatchDto L1 校验为 [RedispatchResult]。 */
+    fun buildRedispatchResult(
+        dto: RedispatchDto,
+        currentLead: ExpertId,
+        fallbackTeam: List<ExpertId>
+    ): RedispatchResult {
+        var team = ExpertId.coerceAll(dto.new_team)
+        if (team.isEmpty()) team = fallbackTeam
+        if (team.size < 2) team = (team + currentLead).distinct().take(4)
+        if (team.size > 4) team = team.take(4)
+
+        val leadRaw = dto.new_team_lead?.trim()?.uppercase().orEmpty()
+        val lead = team.firstOrNull { it.raw == leadRaw }
+            ?: team.firstOrNull()
+            ?: currentLead
+
+        return RedispatchResult(
+            newTeam = team,
+            newTeamLead = lead,
+            resumeFromStep = (dto.resume_from_step ?: "s1").take(20),
+            routingReason = (dto.routing_reason ?: "redispatch after escalation").take(160)
         )
     }
 }

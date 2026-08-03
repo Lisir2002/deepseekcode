@@ -1,12 +1,13 @@
 package com.deepseek.coder.data.police
 
 /**
- * Police Layer v2.0 — L2 prompt 层（system prompt 常量）
+ * Police Layer v2.1 — L2 prompt 层（system prompt 常量）
  *
- * 设计依据：SPEC-Police-v1.0.md (内容为 v2.0) §3 / §4 / §7
- *  - 路由警察：分析问题 → 动态组队 → 指定组长
- *  - 12 个专家：各自专精的 system prompt
+ * 设计依据：SPEC-Police-v2.1.md §3 / §4 / §7
+ *  - 路由警察：分析问题 → 动态组队 → 指定组长 → v2.1 升级重组队
+ *  - 12 个专家：各自专精的 system prompt（GEN v2.1 只出决策不写代码）
  *  - 拒答放宽：仅高危硬拦截，其余走路由判定 + 软拒引导
+ *  - v2.1 新增：LLM 二次验证 / 组长换人 / 路由重组队 prompt
  *
  * 所有 prompt 严格遵循"只输出 JSON，无 markdown fence"约束。
  */
@@ -168,20 +169,24 @@ scope_tag 枚举：
 若执行过程中发现本专家无法解决的新问题，feedback_to_lead 字段说明，否则留空。
     """.trimIndent()
 
-    /** GEN 生成专家。 */
+    /** GEN 生成专家（v2.1：只出决策不写代码，capability_prompt 已废弃）。 */
     val EXPERT_GEN: String = """
 $EXPERT_HEADER
 
-你是【生成专家】。职责：从无到有写代码。
-capability_prompt 给 Actor（代码生成模型）的执行指令，<=500 字：
-- 明确技术栈/语言
-- 列出关键 API/类名
-- 给出代码结构骨架（class/fun 签名级别）
-- 标注必须的 import
-- 注明空安全/协程/异常处理要求
+你是【生成专家】。职责：决策"要生成什么"，不写代码本身。
+
+v2.1 原则：你只出决策约束清单，绝不写代码骨架/class/fun 签名/import。代码生成交给下游 Actor。
+
+决策内容：
+- tech_stack: 技术栈清单（如 ["Kotlin","Coroutines","Room"]）
+- constraints: 实现约束（如 ["使用 suspend 函数","空安全用 ?. 处理","Repository 模式"]）
+- acceptance_criteria: 验收点（如 ["编译通过","无 force unwrap","覆盖核心逻辑测试"]）
+- risks: 潜在风险（如 ["协程上下文泄漏","Room schema 迁移"]）
+
+若执行过程中发现本专家无法解决的新问题（如需修复而非新生成），feedback_to_lead 字段说明。
 
 输出 Schema：
-{"expert_id":"GEN","decision":"generate_code","capability_prompt":"<执行指令>","output_format_hint":"<fenced 代码块 + 1-3 条注意事项>","depends_on":[],"feedback_to_lead":""}
+{"expert_id":"GEN","decision":"generate_code","tech_stack":["<技术>"],"constraints":["<约束>"],"acceptance_criteria":["<验收>"],"risks":["<风险>"],"depends_on":[],"feedback_to_lead":""}
     """.trimIndent()
 
     /** EXPLAIN 解释专家。 */
@@ -365,6 +370,77 @@ error_type 枚举：syntax_error / test_failure / timeout / logic_error / resour
 
 输出 Schema：
 {"expert_id":"CHECK","decision":"DONE|RETRY|REWORK|ESCALATE|BLOCKED","passed":true|false,"error_type":"<6 枚举之一，passed=true 时为 none>","error_reason":"<错误归因，<=100 字>","patch_prompt_suffix":"<RETRY/REWORK 时给修复指令；否则空>","escalation_reason":"<ESCALATE 时说明为何升级；否则空>","attempted_approaches_append":"<本次尝试思路摘要>"}
+    """.trimIndent()
+
+    // ==================================================================
+    // v2.1 新增：LLM 二次验证 / 组长换人 / 路由重组队
+    // ==================================================================
+
+    /** LLM 二次验证（扮编译器/测试者，给 CHECK 提供真实 error_type）。 */
+    val LLM_VERIFY: String = """
+你是 DeepCoder 的代码验证器（扮编译器/测试者）。只输出 JSON，不输出任何其他内容、不要 markdown fence。
+
+任务：审查助理生成的代码，判断错误类型。手机端无真实编译/测试环境，你需扮演该角色给出最可能判断。
+
+error_type 枚举（严格匹配）：
+- syntax_error: 语法错误（括号不匹配/缺分号/拼写错误/类型不匹配）
+- test_failure: 逻辑错误导致测试失败（可从代码逻辑推断）
+- timeout: 明显的性能问题（如 O(n²) 在大数据集/死循环风险）
+- logic_error: 逻辑错误（边界条件/空指针/算法实现错误）
+- resource_error: 资源错误（未关闭流/内存泄漏/文件句柄泄漏）
+- none: 无明显错误
+
+confidence_bucket：
+- high: 错误明确可见（如明显的括号不匹配）
+- medium: 推断性错误（如可能的空指针）
+- low: 不确定
+
+判断原则：
+- 仔细阅读代码，找出最严重的错误类型
+- 若无明显错误，error_type=none
+- 若有多种错误，按严重度选最严重的（syntax > logic > test > timeout > resource）
+
+输出 Schema：
+{"error_type":"<6 枚举之一>","error_reason":"<具体错误，<=200 字>","confidence_bucket":"high|medium|low"}
+    """.trimIndent()
+
+    /** 组长换人决策（执行中组员反馈时调用）。 */
+    val TEAM_LEAD_SWAP: String = """
+你是 DeepCoder 专家组的组长。只输出 JSON，不输出任何其他内容、不要 markdown fence。
+
+任务：组员专家反馈了新问题，你判断是否需要换人。
+
+决策：
+- SWAP_MEMBER: 当前组员无法解决，从 12 专家池换一个更合适的（如 GEN 反馈需修复→换 FIX）
+- KEEP_TEAM: 本组可解决，保留当前组员，调整计划即可
+
+12 专家池：GEN/EXPLAIN/REFACTOR/FIX/TRANSLATE/REVIEW/ARCH/TEST/DEPS/CLARIFY/GOVERN/CHECK
+
+约束：
+- remove_expert 和 add_expert 必须同时给出（若 SWAP_MEMBER）
+- add_expert 必须从 12 池选
+- 换人不算升级（不增加 escalation_count）
+
+输出 Schema：
+{"action":"SWAP_MEMBER|KEEP_TEAM","remove_expert":"<专家 ID>","add_expert":"<专家 ID>","reason":"<换人理由，<=100 字>"}
+    """.trimIndent()
+
+    /** 路由警察重组队（组长升级时调用）。 */
+    val DISPATCHER_REDISPATCH: String = """
+你是 DeepCoder 的路由警察（重组队模式）。只输出 JSON，不输出任何其他内容、不要 markdown fence。
+
+任务：组长升级报告本组无法解决，你重新组队并指定从哪步恢复。
+
+12 专家池：GEN/EXPLAIN/REFACTOR/FIX/TRANSLATE/REVIEW/ARCH/TEST/DEPS/CLARIFY/GOVERN/CHECK
+
+重组队原则：
+- 分析升级原因，追加/替换/换组长
+- 队伍规模 2~4 人
+- resume_from_step 指定从哪个 step id 恢复（通常是失败的步）
+- 若升级原因是某专家能力不足，替换该专家
+
+输出 Schema：
+{"new_team":["<专家 ID>"],"new_team_lead":"<组长 ID>","resume_from_step":"<step id>","routing_reason":"<重组理由，<=100 字>"}
     """.trimIndent()
 
     // ==================================================================

@@ -6,14 +6,15 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Police Layer v2.0 — 路由警察（Dispatcher）
+ * Police Layer v2.1 — 路由警察（Dispatcher）
  *
- * 设计依据：SPEC-Police-v1.0.md (内容为 v2.0) §3 / §5 / §6 / §7
+ * 设计依据：SPEC-Police-v2.1.md §3 / §5 / §6 / §7
  *  - 分析用户问题 → 动态组队 → 指定组长
  *  - two-stage 默认开（Stage 1 意图/难度/范围/澄清/拒答 → Stage 2 组队）
  *  - L1 guard rail 前置（高危词硬拦截 + 软磨硬泡维持拒答）
  *  - GENERAL_CHAT 不组队（直接输出 refuse_hint）
  *  - NEEDS_CLARIFICATION 强制选 CLARIFY 专家
+ *  - v2.1 新增：redispatch（组长升级时重组队，从 resume_from_step 恢复）
  */
 @Singleton
 class DispatcherPolice @Inject constructor(
@@ -103,6 +104,86 @@ class DispatcherPolice @Inject constructor(
             runId = runId,
             team = result.expertTeam.map { it.raw },
             outcome = "dispatched: intent=${result.intent.raw}, cap=${result.cap.raw}"
+        )
+
+        return result
+    }
+
+    /**
+     * v2.1：路由警察重组队（组长升级时调用）。
+     *
+     * 当组长 shouldEscalate=true 且 escalation_count < MAX_ESCALATIONS 时调用。
+     * 重新组队并指定从哪步恢复（resume_from_step）。
+     *
+     * L1 硬规则：escalation_count >= MAX_ESCALATIONS 时不再重组队，返回 BLOCKED 标记。
+     *
+     * @param runId           用于状态注入 + 升级计数
+     * @param escalationReason 组长升级原因
+     * @param currentTeam     当前组队
+     * @param currentLead     当前组长
+     * @param failedStepId    失败的 step id
+     * @param userMessage     原始用户消息（重组队需要重新分析）
+     * @return 重组队结果（newTeam/newTeamLead/resumeFromStep）；escalation 超限返回 null
+     */
+    suspend fun redispatch(
+        runId: String,
+        escalationReason: String,
+        currentTeam: List<PoliceSchemas.ExpertId>,
+        currentLead: PoliceSchemas.ExpertId,
+        failedStepId: String,
+        userMessage: String
+    ): PoliceSchemas.RedispatchResult? {
+        // 记录升级
+        tracker.recordEscalation(runId, escalationReason)
+
+        // L1: 升级超限 → 不重组队
+        if (tracker.shouldBlock(runId)) {
+            AppLogger.w(message = "Dispatcher: escalation_count >= ${EscalationTracker.MAX_ESCALATIONS}, BLOCKED")
+            return null
+        }
+
+        val stateBlock = tracker.snapshotForPrompt(runId)
+        val userPrompt = buildString {
+            appendLine(stateBlock)
+            appendLine()
+            appendLine("组长升级报告：")
+            appendLine("- escalation_reason: ${escalationReason.take(300)}")
+            appendLine("- current_team: ${currentTeam.joinToString(",") { it.raw }}")
+            appendLine("- current_lead: ${currentLead.raw}")
+            appendLine("- failed_step_id: $failedStepId")
+            appendLine()
+            appendLine("原始用户需求：")
+            appendLine(userMessage.take(3000))
+            appendLine()
+            appendLine("请重新组队并指定从哪步恢复。")
+        }
+
+        val dto = client.callJson(
+            systemPrompt = PolicePrompts.DISPATCHER_REDISPATCH,
+            userPrompt = userPrompt,
+            serializer = PoliceSchemas.RedispatchDto.serializer()
+        )
+
+        val result = if (dto != null) {
+            PoliceSchemas.buildRedispatchResult(dto, currentLead, currentTeam)
+        } else {
+            AppLogger.w(message = "Dispatcher: redispatch call failed, using fallback team")
+            // Fallback：在当前队伍基础上追加一个专家
+            val fallbackAdd = PoliceSchemas.ExpertId.CHECK
+            val newTeam = (currentTeam + fallbackAdd).distinct().take(4)
+            PoliceSchemas.RedispatchResult(
+                newTeam = newTeam,
+                newTeamLead = currentLead,
+                resumeFromStep = failedStepId,
+                routingReason = "redispatch fallback (call failed)"
+            )
+        }
+
+        // 记录重组队
+        tracker.recordTeamRound(
+            runId = runId,
+            team = result.newTeam.map { it.raw },
+            outcome = "redispatch: ${result.routingReason}, resume=${result.resumeFromStep}"
         )
 
         return result

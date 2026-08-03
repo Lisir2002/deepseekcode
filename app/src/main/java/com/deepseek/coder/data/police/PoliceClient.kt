@@ -15,14 +15,15 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Police Layer v2.0 — 警察/专家统一调用客户端
+ * Police Layer v2.1 — 警察/专家统一调用客户端
  *
- * 设计依据：SPEC-Police-v1.0.md (内容为 v2.0) §1.3 / §2.1 / §6
+ * 设计依据：SPEC-Police-v2.1.md §1.3 / §2.1 / §6
  *  - 全部用 deepseek-v4-flash 非思考模式（决策任务不需要思考模式）
  *  - response_format = json_object
  *  - temperature = 0.05（决策任务低温稳定）
  *  - JSON 三层 repair（L1 直接 parse → L2 抽 {...} → L3 失败重试一次）
  *  - 支持单 stage / two-stage 调用
+ *  - v2.1 新增 callVerify（LLM 二次验证，给 CHECK 提供真实 error_type）
  *
  * 不直接生成代码（只决策），代码生成仍走 Actor（ChatRepository.sendChat 流式）。
  */
@@ -91,6 +92,27 @@ class PoliceClient @Inject constructor(
         }
         val s2 = callJson(s2System, s2User, s2Serializer)
         return s1 to s2
+    }
+
+    /**
+     * v2.1 LLM 二次验证（给 CHECK 提供真实 error_type）。
+     *
+     * 扮演编译器/测试者审查助理输出，返回 error_type/error_reason/confidence_bucket。
+     * 失败时返回 null（CHECK 将退化为 v2.0 的肉眼判断模式）。
+     */
+    suspend fun callVerify(assistantOutput: String): PoliceSchemas.LlmVerifyResult? {
+        val userPrompt = buildString {
+            appendLine("待验证的助理输出：")
+            appendLine(assistantOutput.take(4000))
+            appendLine()
+            appendLine("请审查以上代码，判断 error_type。")
+        }
+        val dto = callJson(
+            systemPrompt = PolicePrompts.LLM_VERIFY,
+            userPrompt = userPrompt,
+            serializer = PoliceSchemas.LlmVerifyDto.serializer()
+        ) ?: return null
+        return PoliceSchemas.buildLlmVerifyResult(dto)
     }
 
     /** 裸调用（不带 repair，返回原始字符串），供 callJson 内部使用。 */

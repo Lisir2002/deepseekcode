@@ -2,6 +2,11 @@ package com.deepseek.coder.data.workflow
 
 import com.deepseek.coder.core.AppError
 import com.deepseek.coder.core.DispatcherProvider
+import com.deepseek.coder.data.police.DispatcherPolice
+import com.deepseek.coder.data.police.EscalationTracker
+import com.deepseek.coder.data.police.ExpertRunner
+import com.deepseek.coder.data.police.PoliceSchemas
+import com.deepseek.coder.data.police.TeamLead
 import com.deepseek.coder.data.settings.AppSettings
 import com.deepseek.coder.data.settings.SettingsRepository
 import com.deepseek.coder.data.workflow.prompts.WorkflowPrompts
@@ -18,11 +23,6 @@ import com.deepseek.coder.domain.workflow.WorkflowEvent
 import com.deepseek.coder.domain.workflow.WorkflowPlan
 import com.deepseek.coder.domain.workflow.WorkflowState
 import com.deepseek.coder.domain.workflow.WorkflowStep
-import com.deepseek.coder.data.police.DispatcherPolice
-import com.deepseek.coder.data.police.EscalationTracker
-import com.deepseek.coder.data.police.ExpertRunner
-import com.deepseek.coder.data.police.PoliceSchemas
-import com.deepseek.coder.data.police.TeamLead
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -39,19 +39,23 @@ import javax.inject.Singleton
 import kotlin.math.max
 
 /**
- * Orchestrator v2.0 — 警察层接入版
+ * Orchestrator v2.1 — 警察层接入版（6 项架构修复）
  *
- * 设计依据：SPEC-Police-v1.0.md (内容为 v2.0)
- *  FSM 节点 → 警察/专家映射：
- *   - CLASSIFY        → DispatcherPolice.dispatch()       （路由警察：意图 + 动态组队）
- *   - CLARIFY_QUESTION→ ExpertRunner.runClarify()         （CLARIFY 专家：生成澄清问题）
- *   - GOVERN_CONTEXT  → ContextGovernor.trim()            （L1 硬 token 预算，GOVERN 专家决策留作后续增强）
- *   - DECOMPOSE       → TeamLead.plan()                   （组长：two-stage 制定执行计划）
- *   - EXECUTE         → ExpertRunner.run() + Actor 流式   （专家决策 capability → Actor 生成代码）
- *   - SELF_CHECK      → ExpertRunner.runCheck()           （CHECK 专家 + L1 决策矩阵）
+ * 设计依据：SPEC-Police-v2.1.md
+ *  FSM 节点 → 警察/专家映射（v2.1 修正）：
+ *   - CLASSIFY        → DispatcherPolice.dispatch()       路由警察 two-stage
+ *   - CLARIFY_QUESTION→ ExpertRunner.runClarify()         CLARIFY 专家
+ *   - GOVERN_CONTEXT  → runGovern() + Governor.trimByStrategy()  v2.1 决策+执行分离
+ *   - DECOMPOSE       → TeamLead.plan()                   组长 two-stage
+ *   - EXECUTE         → ExpertRunner.run() + Actor        v2.1 GEN 只出决策，Actor 按决策生成
+ *   - SELF_CHECK      → ExpertRunner.runCheck()           v2.1 + LLM 二次验证激活决策矩阵
  *
- *  原则：只决策不执行。警察/专家只输出 JSON 决策，代码生成仍走 Actor（ChatRepository.sendChat 流式）。
- *  GENERAL_CHAT 不组队、不调 Actor，直接输出 refuseHint。
+ *  v2.1 层级反馈回路（真实接通）：
+ *   - 专家 feedback_to_lead → 收集反馈
+ *   - 组长 shouldEscalate(feedbacks) → 判断升级
+ *   - 不升级 → swapMember 动态换人（从 12 池追加/替换）
+ *   - 升级 → DispatcherPolice.redispatch() 重组队，从 resume_from_step 恢复
+ *   - escalation_count >= 3 → L1 强制 BLOCKED
  */
 @Singleton
 class OrchestratorImpl @Inject constructor(
@@ -65,7 +69,6 @@ class OrchestratorImpl @Inject constructor(
     private val escalationTracker: EscalationTracker
 ) : Orchestrator {
 
-    /** Pending clarifications for runs currently suspended on CLARIFY_QUESTION. */
     private val clarifications = mutableMapOf<String, MutableList<String>>()
     private val clarificationsMutex = Mutex()
 
@@ -94,13 +97,13 @@ class OrchestratorImpl @Inject constructor(
         send(WorkflowEvent.Orch(OrchestratorEvent.Started(runId)))
 
         try {
-            // ---- Step 1: CLASSIFY (路由警察 two-stage) ----
+            // ---- Step 1: CLASSIFY ----
             transition(WorkflowState.CLASSIFY)
-            val dispatch = dispatcherPolice.dispatch(runId, userMessage, history)
-            val classification = mapDispatchToClassification(dispatch)
+            var dispatch = dispatcherPolice.dispatch(runId, userMessage, history)
+            var classification = mapDispatchToClassification(dispatch)
             send(WorkflowEvent.Orch(OrchestratorEvent.Classification(classification)))
 
-            // ---- Step 1b: GENERAL_CHAT → 直接拒答，不组队、不调 Actor ----
+            // ---- Step 1b: GENERAL_CHAT 直接拒答 ----
             if (dispatch.intent == PoliceSchemas.Intent.GENERAL_CHAT) {
                 val refuseMsg = ChatMessage(
                     role = ChatRole.ASSISTANT,
@@ -112,8 +115,7 @@ class OrchestratorImpl @Inject constructor(
                 return@channelFlow
             }
 
-            // ---- Step 1c: CLARIFY (CLARIFY 专家) ----
-            var effectiveDispatch = dispatch
+            // ---- Step 1c: CLARIFY ----
             var clarifiedUserMessage = userMessage
             if (dispatch.needClarify || dispatch.intent == PoliceSchemas.Intent.NEEDS_CLARIFICATION) {
                 transition(WorkflowState.CLARIFY_QUESTION)
@@ -136,14 +138,13 @@ class OrchestratorImpl @Inject constructor(
                             }
                         }
                     )
-                    // 澄清后重新路由
                     transition(WorkflowState.CLASSIFY)
-                    effectiveDispatch = dispatcherPolice.dispatch(runId, clarifiedUserMessage, history)
-                    send(WorkflowEvent.Orch(OrchestratorEvent.Classification(mapDispatchToClassification(effectiveDispatch))))
-                    if (effectiveDispatch.intent == PoliceSchemas.Intent.GENERAL_CHAT) {
+                    dispatch = dispatcherPolice.dispatch(runId, clarifiedUserMessage, history)
+                    send(WorkflowEvent.Orch(OrchestratorEvent.Classification(mapDispatchToClassification(dispatch))))
+                    if (dispatch.intent == PoliceSchemas.Intent.GENERAL_CHAT) {
                         val refuseMsg = ChatMessage(
                             role = ChatRole.ASSISTANT,
-                            text = effectiveDispatch.refuseHint.ifBlank { defaultRefuseHint() }
+                            text = dispatch.refuseHint.ifBlank { defaultRefuseHint() }
                         )
                         send(WorkflowEvent.Chat(ChatStreamEvent.Finish(reason = "stop", usage = null)))
                         transition(WorkflowState.DONE)
@@ -153,118 +154,210 @@ class OrchestratorImpl @Inject constructor(
                 }
             }
 
-            // ---- Step 2: GOVERN_CONTEXT (L1 硬 token 预算) ----
+            // ---- Step 2: GOVERN_CONTEXT（v2.1：GOVERN 决策 + Governor 执行）----
             transition(WorkflowState.GOVERN_CONTEXT)
             val contextIn = history + clarifiedUserMessage
-            val (contextOut, trim) = withContext(dispatchers.default) {
-                contextGovernor.trim(contextIn, maxTokens = max(1024, base.maxTokens * 4 / 5))
+            val (contextOut, trim) = if (history.size > 8) {
+                // 历史超 8 轮，调 GOVERN 专家出策略
+                val historySummary = buildHistorySummaryForGovern(contextIn)
+                val governResult = expertRunner.runGovern(runId, historySummary, base.maxTokens)
+                val (trimmed, report) = contextGovernor.trimByStrategy(contextIn, governResult)
+                trimmed to report
+            } else {
+                // 历史短，直接用硬 token 预算
+                withContext(dispatchers.default) {
+                    contextGovernor.trim(contextIn, maxTokens = max(1024, base.maxTokens * 4 / 5))
+                }
             }
             send(WorkflowEvent.Orch(OrchestratorEvent.ContextTrimmed(trim.originalCount, trim.finalCount, trim.summarised)))
 
-            // ---- Step 3: DECOMPOSE (组长 two-stage) ----
+            // ---- Step 3: DECOMPOSE ----
             transition(WorkflowState.DECOMPOSE)
-            val teamPlan = teamLead.plan(runId, clarifiedUserMessage.text, effectiveDispatch)
-            val plan = mapTeamPlanToWorkflowPlan(teamPlan)
+            var teamPlan = teamLead.plan(runId, clarifiedUserMessage.text, dispatch)
+            var plan = mapTeamPlanToWorkflowPlan(teamPlan)
             send(WorkflowEvent.Orch(OrchestratorEvent.PlanProduced(plan)))
 
-            // ---- Step 4: EXECUTE + SELF_CHECK（专家决策 → Actor 执行 → CHECK 验证）----
+            // ---- Step 4: EXECUTE + SELF_CHECK（含 v2.1 层级反馈回路）----
             var retryCount = 0
             val maxRetry = 1
             var finalAssistant = ChatMessage(role = ChatRole.ASSISTANT, text = "")
             var usageSnap: UsageSnapshot? = null
             var blocked = false
+            var currentTeam = dispatch.expertTeam
+            var currentLead = dispatch.teamLead
 
-            for ((stepIdx, planStep) in teamPlan.steps.withIndex()) {
-                escalationTracker.updateProgress(runId, stepIdx, "executing: ${planStep.title}")
-                val step = WorkflowStep(
-                    index = stepIdx,
-                    title = planStep.title,
-                    systemPromptHints = buildStepHints(planStep),
-                    dependsOn = planStep.dependsOn.mapNotNull { id ->
-                        teamPlan.steps.indexOfFirst { it.id == id }.takeIf { it >= 0 }
-                    },
-                    requiresSelfCheck = (stepIdx == teamPlan.steps.lastIndex)
-                )
-                transition(WorkflowState.EXECUTE)
-                send(WorkflowEvent.Orch(OrchestratorEvent.StepStarted(step)))
+            // 支持升级重组队后的恢复执行
+            var startStepIdx = 0
+            var escalationRounds = 0
+            val maxEscalationRounds = 3
 
-                var stepAttempts = 0
-                var assistantForStep: ChatMessage = ChatMessage(role = ChatRole.ASSISTANT, text = "")
-                var stepUsage: UsageSnapshot? = null
-                var patchSuffix = ""
-                var checkDecision: PoliceSchemas.CheckDecision
-
-                do {
-                    // 4a. 专家决策：生成 capability prompt（只决策不执行）
-                    val expertInput = buildExpertInput(clarifiedUserMessage.text, planStep, patchSuffix)
-                    val expertResult = expertRunner.run(runId, planStep.assignedExpert, expertInput)
-                    val capabilityHints = buildString {
-                        if (expertResult.capabilityPrompt.isNotBlank()) append(expertResult.capabilityPrompt)
-                        if (expertResult.outputFormatHint.isNotBlank()) {
-                            if (isNotEmpty()) append('\n')
-                            append("输出格式：").append(expertResult.outputFormatHint)
-                        }
-                    }
-                    escalationTracker.recordAttempt(runId, capabilityHints.take(200))
-
-                    // 4b. Actor 执行（流式生成代码），专家 capability 作为系统提示增强
-                    val stepWithHints = step.copy(
-                        systemPromptHints = if (capabilityHints.isNotBlank()) capabilityHints else step.systemPromptHints
+            outer@ while (escalationRounds <= maxEscalationRounds) {
+                for (stepIdx in startStepIdx until teamPlan.steps.size) {
+                    val planStep = teamPlan.steps[stepIdx]
+                    escalationTracker.updateProgress(runId, stepIdx, "executing: ${planStep.title}")
+                    val step = WorkflowStep(
+                        index = stepIdx,
+                        title = planStep.title,
+                        systemPromptHints = buildStepHints(planStep),
+                        dependsOn = planStep.dependsOn.mapNotNull { id ->
+                            teamPlan.steps.indexOfFirst { it.id == id }.takeIf { it >= 0 }
+                        },
+                        requiresSelfCheck = (stepIdx == teamPlan.steps.lastIndex)
                     )
-                    val enhancedHistory = buildStepContext(contextOut, stepWithHints, base, classification.intent)
-                    val (msg, use) = executeStepStream(enhancedHistory, base, stepWithHints) { ev ->
-                        trySend(WorkflowEvent.Chat(ev)).isSuccess
-                    }
-                    assistantForStep = msg
-                    stepUsage = use
+                    transition(WorkflowState.EXECUTE)
+                    send(WorkflowEvent.Orch(OrchestratorEvent.StepStarted(step)))
 
-                    // 4c. CHECK 专家自检 + L1 决策矩阵
-                    transition(WorkflowState.SELF_CHECK)
-                    val checkResult = expertRunner.runCheck(runId, assistantForStep.text, "")
-                    val check = mapExpertCheckToSelfCheck(checkResult)
-                    send(WorkflowEvent.Orch(OrchestratorEvent.SelfCheck(check)))
-                    checkDecision = PoliceSchemas.CheckDecision.coerce(checkResult.decision)
+                    var stepAttempts = 0
+                    var assistantForStep: ChatMessage = ChatMessage(role = ChatRole.ASSISTANT, text = "")
+                    var stepUsage: UsageSnapshot? = null
+                    var patchSuffix = ""
+                    var checkDecision: PoliceSchemas.CheckDecision = PoliceSchemas.CheckDecision.DONE
+                    var stepFeedback: String = ""
+                    // v2.1：本步当前专家（动态换人时更新，初始取计划分配的专家）
+                    var currentStepExpert = planStep.assignedExpert
 
-                    when (checkDecision) {
-                        PoliceSchemas.CheckDecision.RETRY,
-                        PoliceSchemas.CheckDecision.REWORK -> {
-                            if (stepAttempts < maxRetry && !check.suggestedFixPrompt.isNullOrBlank()) {
+                    stepRetry@ do {
+                        // 4a. 专家决策（v2.1：GEN 只出决策不写代码，用 currentStepExpert 以支持换人）
+                        val expertInput = buildExpertInput(clarifiedUserMessage.text, planStep, patchSuffix)
+                        val expertResult = expertRunner.run(runId, currentStepExpert, expertInput)
+                        stepFeedback = expertResult.feedbackToLead
+                        escalationTracker.recordAttempt(runId, planStep.title.take(200))
+
+                        // v2.1: 收集组员反馈，判断是否需要换人/升级
+                        if (stepFeedback.isNotBlank()) {
+                            val shouldEscalate = teamLead.shouldEscalate(listOf(stepFeedback))
+                            if (shouldEscalate) {
+                                // 升级回路由警察重组队
                                 transition(WorkflowState.RETRY_FIX)
-                                stepAttempts += 1
-                                retryCount += 1
-                                patchSuffix = check.suggestedFixPrompt
+                                val redispatchResult = dispatcherPolice.redispatch(
+                                    runId = runId,
+                                    escalationReason = stepFeedback,
+                                    currentTeam = currentTeam,
+                                    currentLead = currentLead,
+                                    failedStepId = planStep.id,
+                                    userMessage = clarifiedUserMessage.text
+                                )
+                                if (redispatchResult == null) {
+                                    // L1 强制 BLOCKED
+                                    blocked = true
+                                    break@outer
+                                }
+                                // 重组队成功，更新队伍 + 从失败步恢复
+                                currentTeam = redispatchResult.newTeam
+                                currentLead = redispatchResult.newTeamLead
+                                startStepIdx = teamPlan.steps.indexOfFirst { it.id == redispatchResult.resumeFromStep }
+                                    .takeIf { it >= 0 } ?: stepIdx
+                                escalationRounds += 1
+                                // 重新制定计划（新组长）
+                                transition(WorkflowState.DECOMPOSE)
+                                val newDispatch = dispatch.copy(
+                                    expertTeam = currentTeam,
+                                    teamLead = currentLead
+                                )
+                                teamPlan = teamLead.plan(runId, clarifiedUserMessage.text, newDispatch)
+                                plan = mapTeamPlanToWorkflowPlan(teamPlan)
+                                send(WorkflowEvent.Orch(OrchestratorEvent.PlanProduced(plan)))
+                                continue@outer
                             } else {
-                                // 达到重试上限，接受当前输出
-                                checkDecision = PoliceSchemas.CheckDecision.DONE
+                                // 不升级，尝试动态换人
+                                val swapResult = teamLead.swapMember(runId, stepFeedback, currentTeam)
+                                if (swapResult.shouldSwap && swapResult.removeExpert != null && swapResult.addExpert != null) {
+                                    currentTeam = currentTeam.map {
+                                        if (it == swapResult.removeExpert) swapResult.addExpert!! else it
+                                    }
+                                    // v2.1：换人对当步专家立即生效，重试本步
+                                    if (currentStepExpert == swapResult.removeExpert) {
+                                        currentStepExpert = swapResult.addExpert!!
+                                    }
+                                    stepAttempts += 1
+                                    continue@stepRetry
+                                }
+                                // 不换人，按原计划继续
                             }
                         }
-                        PoliceSchemas.CheckDecision.ESCALATE -> {
-                            escalationTracker.recordEscalation(runId, checkResult.escalationReason)
-                            if (escalationTracker.shouldBlock(runId)) {
-                                checkDecision = PoliceSchemas.CheckDecision.BLOCKED
-                            } else {
-                                // 升级但未到上限：接受当前输出（重新组队留作后续轮次增强）
-                                checkDecision = PoliceSchemas.CheckDecision.DONE
-                            }
+
+                        // 4b. Actor 执行（v2.1：按专家决策约束生成代码）
+                        val decisionHints = buildDecisionHints(expertResult)
+                        val stepWithHints = step.copy(
+                            systemPromptHints = if (decisionHints.isNotBlank()) decisionHints else step.systemPromptHints
+                        )
+                        val enhancedHistory = buildStepContext(contextOut, stepWithHints, base, classification.intent)
+                        val (msg, use) = executeStepStream(enhancedHistory, base, stepWithHints) { ev ->
+                            trySend(WorkflowEvent.Chat(ev)).isSuccess
                         }
-                        PoliceSchemas.CheckDecision.BLOCKED -> blocked = true
-                        PoliceSchemas.CheckDecision.DONE -> { /* 继续 */ }
-                    }
-                } while (checkDecision == PoliceSchemas.CheckDecision.RETRY ||
-                    checkDecision == PoliceSchemas.CheckDecision.REWORK
-                )
+                        assistantForStep = msg
+                        stepUsage = use
 
-                if (stepUsage != null) usageSnap = stepUsage
-                finalAssistant = finalAssistant.copy(
-                    text = finalAssistant.text + if (finalAssistant.text.isBlank()) "" else "\n\n" + stepTitle(step) + "\n" + assistantForStep.text,
-                    reasoning = listOfNotNull(finalAssistant.reasoning, assistantForStep.reasoning)
-                        .filter { it.isNotBlank() }
-                        .joinToString("\n---\n")
-                        .ifBlank { null }
-                )
-                send(WorkflowEvent.Orch(OrchestratorEvent.StepFinished(step)))
+                        // 4c. CHECK 专家自检 + LLM 二次验证
+                        transition(WorkflowState.SELF_CHECK)
+                        val checkResult = expertRunner.runCheck(runId, assistantForStep.text, "")
+                        val check = mapExpertCheckToSelfCheck(checkResult)
+                        send(WorkflowEvent.Orch(OrchestratorEvent.SelfCheck(check)))
+                        checkDecision = PoliceSchemas.CheckDecision.coerce(checkResult.decision)
 
-                if (blocked) break
+                        when (checkDecision) {
+                            PoliceSchemas.CheckDecision.RETRY,
+                            PoliceSchemas.CheckDecision.REWORK -> {
+                                if (stepAttempts < maxRetry && !check.suggestedFixPrompt.isNullOrBlank()) {
+                                    transition(WorkflowState.RETRY_FIX)
+                                    stepAttempts += 1
+                                    retryCount += 1
+                                    patchSuffix = check.suggestedFixPrompt
+                                } else {
+                                    checkDecision = PoliceSchemas.CheckDecision.DONE
+                                }
+                            }
+                            PoliceSchemas.CheckDecision.ESCALATE -> {
+                                // CHECK 升级 → 路由重组队
+                                val redispatchResult = dispatcherPolice.redispatch(
+                                    runId = runId,
+                                    escalationReason = checkResult.escalationReason.ifBlank { "CHECK ESCALATE" },
+                                    currentTeam = currentTeam,
+                                    currentLead = currentLead,
+                                    failedStepId = planStep.id,
+                                    userMessage = clarifiedUserMessage.text
+                                )
+                                if (redispatchResult == null) {
+                                    blocked = true
+                                    break@outer
+                                }
+                                currentTeam = redispatchResult.newTeam
+                                currentLead = redispatchResult.newTeamLead
+                                startStepIdx = teamPlan.steps.indexOfFirst { it.id == redispatchResult.resumeFromStep }
+                                    .takeIf { it >= 0 } ?: stepIdx
+                                escalationRounds += 1
+                                transition(WorkflowState.DECOMPOSE)
+                                val newDispatch = dispatch.copy(
+                                    expertTeam = currentTeam,
+                                    teamLead = currentLead
+                                )
+                                teamPlan = teamLead.plan(runId, clarifiedUserMessage.text, newDispatch)
+                                plan = mapTeamPlanToWorkflowPlan(teamPlan)
+                                send(WorkflowEvent.Orch(OrchestratorEvent.PlanProduced(plan)))
+                                continue@outer
+                            }
+                            PoliceSchemas.CheckDecision.BLOCKED -> {
+                                blocked = true
+                            }
+                            PoliceSchemas.CheckDecision.DONE -> { /* 继续 */ }
+                        }
+                    } while (checkDecision == PoliceSchemas.CheckDecision.RETRY ||
+                        checkDecision == PoliceSchemas.CheckDecision.REWORK
+                    )
+
+                    if (stepUsage != null) usageSnap = stepUsage
+                    finalAssistant = finalAssistant.copy(
+                        text = finalAssistant.text + if (finalAssistant.text.isBlank()) "" else "\n\n" + stepTitle(step) + "\n" + assistantForStep.text,
+                        reasoning = listOfNotNull(finalAssistant.reasoning, assistantForStep.reasoning)
+                            .filter { it.isNotBlank() }
+                            .joinToString("\n---\n")
+                            .ifBlank { null }
+                    )
+                    send(WorkflowEvent.Orch(OrchestratorEvent.StepFinished(step)))
+
+                    if (blocked) break@outer
+                }
+                break@outer  // 所有步骤完成
             }
 
             send(WorkflowEvent.Chat(ChatStreamEvent.Finish(reason = "stop", usage = usageSnap)))
@@ -298,6 +391,34 @@ class OrchestratorImpl @Inject constructor(
             }
         }
         .flowOn(dispatchers.default)
+
+    // -------------------------------------------------------------------------------
+    // v2.1：专家决策 → Actor 提示构建
+    // -------------------------------------------------------------------------------
+
+    /** v2.1：把专家决策（GEN 的 techStack/constraints/... 或其他专家的 capabilityPrompt）转为 Actor 提示。 */
+    private fun buildDecisionHints(result: PoliceSchemas.ExpertResult): String = buildString {
+        // v2.1 GEN 决策字段优先
+        if (result.techStack.isNotEmpty()) {
+            appendLine("技术栈：${result.techStack.joinToString(", ")}")
+        }
+        if (result.constraints.isNotEmpty()) {
+            appendLine("实现约束：")
+            result.constraints.forEach { appendLine("- $it") }
+        }
+        if (result.acceptanceCriteria.isNotEmpty()) {
+            appendLine("验收点：")
+            result.acceptanceCriteria.forEach { appendLine("- $it") }
+        }
+        if (result.risks.isNotEmpty()) {
+            appendLine("风险提示：")
+            result.risks.forEach { appendLine("- $it") }
+        }
+        // v2.0 兼容：其他专家仍用 capability_prompt
+        if (result.capabilityPrompt.isNotBlank() && isEmpty()) {
+            append(result.capabilityPrompt)
+        }
+    }.trim()
 
     // -------------------------------------------------------------------------------
     // 警察层 → 领域模型映射
@@ -379,11 +500,17 @@ class OrchestratorImpl @Inject constructor(
         }
     }
 
+    private fun buildHistorySummaryForGovern(history: List<ChatMessage>): String = buildString {
+        history.takeLast(12).forEachIndexed { i, m ->
+            appendLine("m${history.indexOf(m)} [${m.role.name.lowercase()}]: ${m.text.take(120).replace("\n", " ")}")
+        }
+    }.take(6000)
+
     private fun defaultRefuseHint(): String =
         "这超出代码助手范围。如果你有编程相关的需求（代码生成/调试/重构/审查），我可以帮你。"
 
     // -------------------------------------------------------------------------------
-    // Actor 执行（流式代码生成，保留原有实现）
+    // Actor 执行（流式代码生成）
     // -------------------------------------------------------------------------------
 
     private suspend fun executeStepStream(

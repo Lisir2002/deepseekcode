@@ -5,12 +5,14 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Police Layer v2.0 — 专家统一执行器
+ * Police Layer v2.1 — 专家统一执行器
  *
- * 设计依据：SPEC-Police-v1.0.md (内容为 v2.0) §4
+ * 设计依据：SPEC-Police-v2.1.md §4
  *  - 12 个专家共享统一输出 Schema（PoliceSchemas.ExpertDto），只是 system prompt 不同
  *  - 通过 ExpertId 路由到对应 prompt（PolicePrompts.expertPrompt）
  *  - 失败时返回 fallback ExpertResult（不阻塞流程）
+ *  - v2.1：runCheck 接入 LLM 二次验证，激活完整决策矩阵
+ *  - v2.1：fallback 填充 GEN 决策字段（techStack/constraints/...）
  */
 @Singleton
 class ExpertRunner @Inject constructor(
@@ -63,21 +65,50 @@ class ExpertRunner @Inject constructor(
         return run(runId, PoliceSchemas.ExpertId.CLARIFY, enriched)
     }
 
-    /** 调用 CHECK 专家（专用，因输入需要执行结果 + attempts + error_type）。 */
+    /**
+     * 调用 CHECK 专家（专用，因输入需要执行结果 + attempts + error_type）。
+     *
+     * v2.1：先调 [PoliceClient.callVerify] 获取 LLM 二次验证的 error_type，
+     * 作为 errorHint 传给 CHECK 专家，激活完整决策矩阵（test_failure/timeout/logic_error 等）。
+     * 验证失败时退化为 v2.0 的肉眼判断模式（errorHint 为空）。
+     */
     suspend fun runCheck(
         runId: String,
         assistantOutput: String,
         errorHint: String
     ): PoliceSchemas.ExpertResult {
+        // v2.1: LLM 二次验证（扮编译器/测试者）
+        val verifyResult = client.callVerify(assistantOutput)
+        val mergedErrorHint = buildString {
+            if (errorHint.isNotBlank()) {
+                appendLine("外部错误提示：")
+                appendLine(errorHint)
+            }
+            if (verifyResult != null) {
+                appendLine("LLM 二次验证结果：")
+                appendLine("- error_type: ${verifyResult.errorType.raw}")
+                appendLine("- error_reason: ${verifyResult.errorReason}")
+                appendLine("- confidence_bucket: ${verifyResult.confidenceBucket.raw}")
+            }
+        }
+
         val enriched = buildString {
             appendLine("待自检的助理输出：")
             appendLine(assistantOutput.take(4000))
             appendLine()
-            appendLine("外部错误提示（编译/测试输出，可能为空）：")
-            appendLine(errorHint.ifBlank { "(无)" })
+            appendLine("外部错误提示 + LLM 二次验证（编译/测试输出，可能为空）：")
+            appendLine(mergedErrorHint.ifBlank { "(无)" })
         }
-        val result = run(runId, PoliceSchemas.ExpertId.CHECK, enriched)
-        return applyCheckHardRules(runId, result)
+        var result = run(runId, PoliceSchemas.ExpertId.CHECK, enriched)
+
+        // v2.1: 若 CHECK 未给 error_type 但 LLM 验证给了，用 LLM 的覆盖
+        if (verifyResult != null && result.errorType == null) {
+            result = result.copy(
+                errorType = verifyResult.errorType,
+                errorReason = if (result.errorReason.isBlank()) verifyResult.errorReason else result.errorReason
+            )
+        }
+        return applyCheckHardRules(runId, result, verifyResult)
     }
 
     /** 调用 GOVERN 专家（专用，因输入需要完整历史 + token 预算）。 */
@@ -96,10 +127,14 @@ class ExpertRunner @Inject constructor(
     }
 
     // ------------------------------------------------------------------
-    // L1 硬规则：CHECK 专家决策矩阵强制覆盖
+    // L1 硬规则：CHECK 专家决策矩阵强制覆盖（v2.1 含 confidence_bucket=low）
     // ------------------------------------------------------------------
 
-    private fun applyCheckHardRules(runId: String, result: PoliceSchemas.ExpertResult): PoliceSchemas.ExpertResult {
+    private fun applyCheckHardRules(
+        runId: String,
+        result: PoliceSchemas.ExpertResult,
+        verifyResult: PoliceSchemas.LlmVerifyResult? = null
+    ): PoliceSchemas.ExpertResult {
         val state = tracker.getOrCreate(runId)
         val decision = PoliceSchemas.CheckDecision.coerce(result.decision)
         val errorType = result.errorType ?: PoliceSchemas.ErrorType.NONE
@@ -140,7 +175,17 @@ class ExpertRunner @Inject constructor(
             }
         } else afterMatrix
 
-        return result.copy(decision = afterDedup.raw)
+        // v2.1 L1: confidence_bucket=low 且 attempts>=2 → 强制 BLOCKED
+        val afterConfidence = if (verifyResult != null &&
+            verifyResult.confidenceBucket == PoliceSchemas.ConfidenceBucket.LOW &&
+            state.attempts >= 2 &&
+            afterDedup != PoliceSchemas.CheckDecision.DONE
+        ) {
+            AppLogger.w(message = "ExpertRunner: low confidence + attempts>=2, forcing BLOCKED")
+            PoliceSchemas.CheckDecision.BLOCKED
+        } else afterDedup
+
+        return result.copy(decision = afterConfidence.raw)
     }
 
     // ------------------------------------------------------------------
@@ -155,6 +200,10 @@ class ExpertRunner @Inject constructor(
             outputFormatHint = "",
             dependsOn = emptyList(),
             feedbackToLead = "",
+            techStack = emptyList(),
+            constraints = emptyList(),
+            acceptanceCriteria = emptyList(),
+            risks = emptyList(),
             clarifyQuestions = emptyList(),
             canProceedWithout = true,
             proceedRisk = "",
@@ -178,6 +227,10 @@ class ExpertRunner @Inject constructor(
             outputFormatHint = "",
             dependsOn = emptyList(),
             feedbackToLead = "",
+            techStack = emptyList(),
+            constraints = emptyList(),
+            acceptanceCriteria = emptyList(),
+            risks = emptyList(),
             clarifyQuestions = listOf(
                 PoliceSchemas.ClarifyQuestion(
                     id = "q1",
@@ -208,6 +261,10 @@ class ExpertRunner @Inject constructor(
             outputFormatHint = "",
             dependsOn = emptyList(),
             feedbackToLead = "",
+            techStack = emptyList(),
+            constraints = emptyList(),
+            acceptanceCriteria = emptyList(),
+            risks = emptyList(),
             clarifyQuestions = emptyList(),
             canProceedWithout = true,
             proceedRisk = "",

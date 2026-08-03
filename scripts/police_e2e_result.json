@@ -1,7 +1,7 @@
 {
-  "passed": 7,
+  "passed": 12,
   "failed": 0,
-  "elapsed_s": 21.8,
+  "elapsed_s": 28.0,
   "results": [
     {
       "id": "S4",
@@ -44,6 +44,36 @@
       "name": "自检决策矩阵",
       "status": "PASS",
       "detail": "L1 硬规则正确强制 BLOCKED"
+    },
+    {
+      "id": "S8",
+      "name": "GEN只出决策",
+      "status": "PASS",
+      "detail": "GEN 出决策字段且无代码骨架（tech_stack=3, constraints=6）"
+    },
+    {
+      "id": "S9",
+      "name": "LLM二次验证",
+      "status": "PASS",
+      "detail": "正确检出 syntax_error（confidence=high）"
+    },
+    {
+      "id": "S10",
+      "name": "动态换人",
+      "status": "PASS",
+      "detail": "正确决策 SWAP_MEMBER: GEN→FIX"
+    },
+    {
+      "id": "S11",
+      "name": "升级重组队",
+      "status": "PASS",
+      "detail": "重组队 ['ARCH', 'GEN', 'TEST']，组长 ARCH，从 s2 恢复"
+    },
+    {
+      "id": "S12",
+      "name": "GOVERN决策分离",
+      "status": "PASS",
+      "detail": "GOVERN 出策略 mode=KEEP_ALL，决策与执行分离（keep/compress/drop 为 id 列表）"
     }
   ]
 }

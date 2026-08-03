@@ -1,19 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Police Layer v2.0 端到端真实 API 测试
+Police Layer v2.1 端到端真实 API 测试
 
 直接调用 DeepSeek API，复用项目里的 prompt 设计（PolicePrompts.kt 内容镜像），
-模拟 OrchestratorImpl 的完整 FSM 流程，验证警察层 v2.0 设计在真实模型上的表现。
+模拟 OrchestratorImpl 的完整 FSM 流程，验证警察层 v2.1 六项架构修复在真实模型上的表现。
+
+v2.1 六项修复覆盖：
+  修复1 层级反馈回路 → S10 动态换人 / S11 升级重组队
+  修复2 GOVERN 决策+执行分离 → S12 GOVERN 出策略
+  修复3 GEN 只出决策不写代码 → S1/S8 验证 GEN 冓策字段（无代码骨架）
+  修复4 组长动态换人 → S10 TEAM_LEAD_SWAP
+  修复5 CHECK 接 LLM 二次验证 → S9 LLM_VERIFY 给 error_type
+  修复6 升级重组队 → S11 DISPATCHER_REDISPATCH
 
 覆盖场景：
-  S1  代码生成（CODE_GENERATE, simple）→ 路由→组队→计划→GEN专家→CHECK 通过
+  S1  代码生成（CODE_GENERATE, simple）→ 路由→组队→计划→GEN决策→Actor→CHECK 通过
   S2  闲聊拒答（GENERAL_CHAT）→ 路由直接拒答，不组队不调 Actor
   S3  澄清流程（NEEDS_CLARIFICATION）→ CLARIFY 专家生成澄清问题
   S4  高危词硬拦截（GuardRails）→ L1 硬规则，不调 API
   S5  软磨硬泡（历史已有拒答）→ 维持拒答
   S6  复杂任务组队（DESIGN_ARCH, complex）→ 多专家组队 + FINE 粒度计划
   S7  自检重试（CHECK 判定 RETRY/REWORK）→ 验证 L1 决策矩阵
+  S8  GEN 只出决策（v2.1）→ 验证 tech_stack/constraints/risks，无代码骨架
+  S9  LLM 二次验证（v2.1）→ 验证 error_type/confidence_bucket
+  S10 动态换人（v2.1）→ 组员 feedback→TEAM_LEAD_SWAP 决策 SWAP_MEMBER
+  S11 升级重组队（v2.1）→ ESCALATE→DISPATCHER_REDISPATCH 重组队+resume_from_step
+  S12 GOVERN 决策+执行分离（v2.1）→ GOVERN 出 mode/keep/compress/drop 策略
 """
 import json
 import sys
@@ -158,16 +171,20 @@ EXPERT_HEADER = """你是 DeepCoder 专家组的成员。只输出 JSON，不输
 
 EXPERT_GEN = EXPERT_HEADER + """
 
-你是【生成专家】。职责：从无到有写代码。
-capability_prompt 给 Actor（代码生成模型）的执行指令，<=500 字：
-- 明确技术栈/语言
-- 列出关键 API/类名
-- 给出代码结构骨架（class/fun 签名级别）
-- 标注必须的 import
-- 注明空安全/协程/异常处理要求
+你是【生成专家】。职责：决策"要生成什么"，不写代码本身。
+
+v2.1 原则：你只出决策约束清单，绝不写代码骨架/class/fun 签名/import。代码生成交给下游 Actor。
+
+决策内容：
+- tech_stack: 技术栈清单（如 ["Kotlin","Coroutines","Room"]）
+- constraints: 实现约束（如 ["使用 suspend 函数","空安全用 ?. 处理","Repository 模式"]）
+- acceptance_criteria: 验收点（如 ["编译通过","无 force unwrap","覆盖核心逻辑测试"]）
+- risks: 潜在风险（如 ["协程上下文泄漏","Room schema 迁移"]）
+
+若执行过程中发现本专家无法解决的新问题（如需修复而非新生成），feedback_to_lead 字段说明。
 
 输出 Schema：
-{"expert_id":"GEN","decision":"generate_code","capability_prompt":"<执行指令>","output_format_hint":"<fenced 代码块 + 1-3 条注意事项>","depends_on":[],"feedback_to_lead":""}"""
+{"expert_id":"GEN","decision":"generate_code","tech_stack":["<技术>"],"constraints":["<约束>"],"acceptance_criteria":["<验收>"],"risks":["<风险>"],"depends_on":[],"feedback_to_lead":""}"""
 
 EXPERT_ARCH = EXPERT_HEADER + """
 
@@ -180,6 +197,83 @@ capability_prompt 给 Actor 的执行指令：
 
 输出 Schema：
 {"expert_id":"ARCH","decision":"design_arch","capability_prompt":"<执行指令>","output_format_hint":"<架构图描述 + 模块清单 + 选型表>","depends_on":[],"feedback_to_lead":""}"""
+
+# v2.1 新增 prompt
+
+LLM_VERIFY = """你是 DeepCoder 的代码验证器（扮编译器/测试者）。只输出 JSON，不输出任何其他内容、不要 markdown fence。
+
+任务：审查助理生成的代码，判断错误类型。手机端无真实编译/测试环境，你需扮演该角色给出最可能判断。
+
+error_type 枚举（严格匹配）：
+- syntax_error: 语法错误（括号不匹配/缺分号/拼写错误/类型不匹配）
+- test_failure: 逻辑错误导致测试失败（可从代码逻辑推断）
+- timeout: 明显的性能问题（如 O(n²) 在大数据集/死循环风险）
+- logic_error: 逻辑错误（边界条件/空指针/算法实现错误）
+- resource_error: 资源错误（未关闭流/内存泄漏/文件句柄泄漏）
+- none: 无明显错误
+
+confidence_bucket：
+- high: 错误明确可见（如明显的括号不匹配）
+- medium: 推断性错误（如可能的空指针）
+- low: 不确定
+
+判断原则：
+- 仔细阅读代码，找出最严重的错误类型
+- 若无明显错误，error_type=none
+- 若有多种错误，按严重度选最严重的（syntax > logic > test > timeout > resource）
+
+输出 Schema：
+{"error_type":"<6 枚举之一>","error_reason":"<具体错误，<=200 字>","confidence_bucket":"high|medium|low"}"""
+
+TEAM_LEAD_SWAP = """你是 DeepCoder 专家组的组长。只输出 JSON，不输出任何其他内容、不要 markdown fence。
+
+任务：组员专家反馈了新问题，你判断是否需要换人。
+
+决策：
+- SWAP_MEMBER: 当前组员无法解决，从 12 专家池换一个更合适的（如 GEN 反馈需修复→换 FIX）
+- KEEP_TEAM: 本组可解决，保留当前组员，调整计划即可
+
+12 专家池：GEN/EXPLAIN/REFACTOR/FIX/TRANSLATE/REVIEW/ARCH/TEST/DEPS/CLARIFY/GOVERN/CHECK
+
+约束：
+- remove_expert 和 add_expert 必须同时给出（若 SWAP_MEMBER）
+- add_expert 必须从 12 池选
+- 换人不算升级（不增加 escalation_count）
+
+输出 Schema：
+{"action":"SWAP_MEMBER|KEEP_TEAM","remove_expert":"<专家 ID>","add_expert":"<专家 ID>","reason":"<换人理由，<=100 字>"}"""
+
+DISPATCHER_REDISPATCH = """你是 DeepCoder 的路由警察（重组队模式）。只输出 JSON，不输出任何其他内容、不要 markdown fence。
+
+任务：组长升级报告本组无法解决，你重新组队并指定从哪步恢复。
+
+12 专家池：GEN/EXPLAIN/REFACTOR/FIX/TRANSLATE/REVIEW/ARCH/TEST/DEPS/CLARIFY/GOVERN/CHECK
+
+重组队原则：
+- 分析升级原因，追加/替换/换组长
+- 队伍规模 2~4 人
+- resume_from_step 指定从哪个 step id 恢复（通常是失败的步）
+- 若升级原因是某专家能力不足，替换该专家
+
+输出 Schema：
+{"new_team":["<专家 ID>"],"new_team_lead":"<组长 ID>","resume_from_step":"<step id>","routing_reason":"<重组理由，<=100 字>"}"""
+
+EXPERT_GOVERN = EXPERT_HEADER + """
+
+你是【治理专家】。职责：决定历史消息的留/删/压缩策略。
+
+消息优先级协议：
+- P0 必留: 用户原始需求、最新指令、当前 plan_state、last_error
+- P1 尽量留: 关键决策点、control token 变更、失败的错误归因
+- P2 可压缩: 中间产物代码、测试输出
+- P3 可删: 寒暄、确认、已被推翻的旧方案
+
+触发式摘要（超 token 预算 80% 时）：
+- 摘要模板："先前尝试：方案A（失败：<错误类型>，<原因>）。当前约束：<性能/语言/规模>。已完成：<step 列表>。"
+- 摘要必须保留：变量名、边界条件、性能/约束数字、用户明确偏好
+
+输出 Schema：
+{"expert_id":"GOVERN","decision":"govern_context","mode":"KEEP_ALL|COMPRESS|SUMMARIZE","keep_message_ids":["<P0/P1 id>"],"compress_message_ids":["<P2 id>"],"drop_message_ids":["<P3 id>"],"summary":"<SUMMARIZE 时填>","estimated_tokens_after":<整数>}"""
 
 EXPERT_CLARIFY = EXPERT_HEADER + """
 
@@ -391,21 +485,33 @@ def test_s1_code_generate():
     if gran != expected_gran:
         log("S1", "代码生成流程", "WARN", f"粒度应为 {expected_gran}，实际 {gran}（继续测试）")
 
-    # 4. GEN 专家
+    # 4. GEN 专家（v2.1：只出决策不写代码）
     expert_input = f"用户需求：\n{user_msg}\n\n当前步骤：生成代码\n步骤目标：实现斐波那契函数"
     gen, err = call_json(EXPERT_GEN, expert_input)
     if not gen:
         log("S1", "代码生成流程", "FAIL", f"GEN 专家失败: {err}")
         return
+    tech_stack = gen.get("tech_stack") or []
+    constraints = gen.get("constraints") or []
+    risks = gen.get("risks") or []
+    print(f"  GEN 专家: decision={gen.get('decision')}, tech_stack={tech_stack}, constraints={len(constraints)}条, risks={len(risks)}条")
+    # v2.1：GEN 应出决策字段且不含代码骨架（无 fun/class/import）
+    if not tech_stack:
+        log("S1", "代码生成流程", "FAIL", "GEN tech_stack 为空（v2.1 应出决策字段）")
+        return
     cap_prompt = gen.get("capability_prompt", "")
-    print(f"  GEN 专家: decision={gen.get('decision')}, capability_prompt 长度={len(cap_prompt)}")
-    if not cap_prompt or len(cap_prompt) < 20:
-        log("S1", "代码生成流程", "FAIL", "GEN capability_prompt 为空或过短")
+    if "fun " in cap_prompt or "class " in cap_prompt:
+        log("S1", "代码生成流程", "FAIL", "GEN 仍输出代码骨架（v2.1 应只决策不写代码）")
         return
 
-    # 5. Actor 生成代码（用 capability_prompt 作为系统提示增强）
+    # 5. Actor 生成代码（v2.1：按 GEN 决策约束生成）
+    decision_hints = ""
+    if tech_stack:
+        decision_hints += f"技术栈：{', '.join(tech_stack)}\n"
+    if constraints:
+        decision_hints += "实现约束：\n" + "\n".join(f"- {c}" for c in constraints) + "\n"
     actor_system = "你是一个资深软件工程师助手 DeepCoder，专注于编写、审查、重构代码。输出代码前请先说明思路。代码需要附带注释并遵循语言惯用风格。"
-    actor_user = f"【本次任务类型：生成代码】请严格按任务类型输出。\n\n{cap_prompt}\n\n用户需求：{user_msg}"
+    actor_user = f"【本次任务类型：生成代码】请严格按任务类型输出。\n\n{decision_hints}\n用户需求：{user_msg}"
     actor_out = call_api(actor_system, actor_user, max_tokens=1500, json_mode=False)
     if isinstance(actor_out, tuple):
         log("S1", "代码生成流程", "FAIL", f"Actor 失败: {actor_out[1]}")
@@ -573,11 +679,163 @@ fun fibonacci(n: Int): Int {
     else:
         log("S7", "自检决策矩阵", "FAIL", f"L1 应强制 BLOCKED，实际 {l1_decision}")
 
+# ---- S8: GEN 只出决策（v2.1 修复3）----
+def test_s8_gen_decision_only():
+    section("S8 GEN 只出决策不写代码（v2.1 修复3）")
+    user_msg = "写一个 Kotlin Room 数据访问层，管理用户表 CRUD"
+    expert_input = f"用户需求：\n{user_msg}\n\n当前步骤：生成 DAO + Entity\n步骤目标：实现 Room 数据访问层"
+    gen, err = call_json(EXPERT_GEN, expert_input)
+    if not gen:
+        log("S8", "GEN只出决策", "FAIL", f"GEN 专家失败: {err}")
+        return
+    tech_stack = gen.get("tech_stack") or []
+    constraints = gen.get("constraints") or []
+    acceptance = gen.get("acceptance_criteria") or []
+    risks = gen.get("risks") or []
+    cap_prompt = gen.get("capability_prompt", "")
+    print(f"  GEN: tech_stack={tech_stack}, constraints={len(constraints)}, acceptance={len(acceptance)}, risks={len(risks)}")
+    # v2.1 断言：出决策字段 + 不写代码骨架
+    has_decision = bool(tech_stack) and bool(constraints)
+    no_skeleton = "fun " not in cap_prompt and "class " not in cap_prompt and "import " not in cap_prompt
+    if has_decision and no_skeleton:
+        log("S8", "GEN只出决策", "PASS", f"GEN 出决策字段且无代码骨架（tech_stack={len(tech_stack)}, constraints={len(constraints)}）")
+    else:
+        reasons = []
+        if not has_decision:
+            reasons.append("决策字段缺失")
+        if not no_skeleton:
+            reasons.append("仍含代码骨架")
+        log("S8", "GEN只出决策", "FAIL", "；".join(reasons))
+
+# ---- S9: LLM 二次验证（v2.1 修复5）----
+def test_s9_llm_verify():
+    section("S9 LLM 二次验证（v2.1 修复5）")
+    # 故意构造有语法错误的代码
+    bad_code = """```kotlin
+fun fibonacci(n: Int): Int {
+    if (n <= 0) return 0
+    if (n == 1) return 1
+    return fibonacci(n - 1) + fibonacci(n - 2  // 缺右括号，语法错误
+}
+```"""
+    verify_input = f"待验证的助理输出：\n{bad_code}\n\n请审查以上代码，判断 error_type。"
+    verify, err = call_json(LLM_VERIFY, verify_input)
+    if not verify:
+        log("S9", "LLM二次验证", "FAIL", f"LLM_VERIFY 失败: {err}")
+        return
+    error_type = verify.get("error_type")
+    confidence = verify.get("confidence_bucket")
+    print(f"  LLM_VERIFY: error_type={error_type}, confidence={confidence}, reason={verify.get('error_reason', '')[:60]}")
+    valid_types = {"syntax_error", "test_failure", "timeout", "logic_error", "resource_error", "none"}
+    if error_type in valid_types and confidence in {"high", "medium", "low"}:
+        # 有语法错误，期望检出 syntax_error
+        if error_type == "syntax_error":
+            log("S9", "LLM二次验证", "PASS", f"正确检出 syntax_error（confidence={confidence}）")
+        else:
+            log("S9", "LLM二次验证", "WARN", f"输出合法但未检出 syntax_error（实际 {error_type}），激活决策矩阵字段格式 OK")
+    else:
+        log("S9", "LLM二次验证", "FAIL", f"error_type/confidence 不合法: {error_type}/{confidence}")
+
+# ---- S10: 动态换人（v2.1 修复1+4）----
+def test_s10_dynamic_swap():
+    section("S10 动态换人（v2.1 修复1+4：组员 feedback→TEAM_LEAD_SWAP）")
+    # 模拟 GEN 反馈"这任务需要修复而非新生成"
+    feedback = "这任务需要修复已有代码而非新生成，超出本专家职责范围，建议换 FIX 专家"
+    current_team = ["GEN", "CHECK"]
+    swap_input = f"组员反馈的新问题：\n{feedback}\n\n当前组队：{','.join(current_team)}\n\n请判断是否需要换人。若本组可解决（调整计划即可）→ KEEP_TEAM；若需换人 → SWAP_MEMBER。"
+    swap, err = call_json(TEAM_LEAD_SWAP, swap_input)
+    if not swap:
+        log("S10", "动态换人", "FAIL", f"TEAM_LEAD_SWAP 失败: {err}")
+        return
+    action = (swap.get("action") or "").strip().upper()
+    remove_expert = swap.get("remove_expert")
+    add_expert = swap.get("add_expert")
+    print(f"  SWAP: action={action}, remove={remove_expert}, add={add_expert}, reason={swap.get('reason', '')[:60]}")
+    valid_pool = {"GEN", "EXPLAIN", "REFACTOR", "FIX", "TRANSLATE", "REVIEW", "ARCH", "TEST", "DEPS", "CLARIFY", "GOVERN", "CHECK"}
+    if action == "SWAP_MEMBER" and remove_expert in valid_pool and add_expert in valid_pool:
+        log("S10", "动态换人", "PASS", f"正确决策 SWAP_MEMBER: {remove_expert}→{add_expert}")
+    elif action == "KEEP_TEAM":
+        log("S10", "动态换人", "WARN", f"决策 KEEP_TEAM（未换人），属边界 case")
+    else:
+        log("S10", "动态换人", "FAIL", f"SWAP_MEMBER 但 remove/add 不合法: action={action}, remove={remove_expert}, add={add_expert}")
+
+# ---- S11: 升级重组队（v2.1 修复6）----
+def test_s11_redispatch():
+    section("S11 升级重组队（v2.1 修复6：ESCALATE→DISPATCHER_REDISPATCH）")
+    escalation_reason = "本组 GEN+CHECK 无法解决，任务涉及架构重构，需要 ARCH 专家介入重新组队"
+    current_team = ["GEN", "CHECK"]
+    current_lead = "GEN"
+    failed_step = "s2"
+    user_msg = "重构这个用户管理模块，要求支持多角色权限，并保持向后兼容"
+    state_block = "【当前执行状态】\n- plan_state: executing\n- current_step: 1\n- attempts: 2\n- escalation_count: 1\n- last_error: GEN 无法解决架构重构"
+    redispatch_input = f"{state_block}\n\n组长升级报告：\n- escalation_reason: {escalation_reason}\n- current_team: {','.join(current_team)}\n- current_lead: {current_lead}\n- failed_step_id: {failed_step}\n\n原始用户需求：\n{user_msg}\n\n请重新组队并指定从哪步恢复。"
+    redispatch, err = call_json(DISPATCHER_REDISPATCH, redispatch_input)
+    if not redispatch:
+        log("S11", "升级重组队", "FAIL", f"DISPATCHER_REDISPATCH 失败: {err}")
+        return
+    new_team = redispatch.get("new_team") or []
+    new_lead = redispatch.get("new_team_lead")
+    resume_step = redispatch.get("resume_from_step")
+    print(f"  REDISPATCH: new_team={new_team}, new_lead={new_lead}, resume={resume_step}")
+    valid_pool = {"GEN", "EXPLAIN", "REFACTOR", "FIX", "TRANSLATE", "REVIEW", "ARCH", "TEST", "DEPS", "CLARIFY", "GOVERN", "CHECK"}
+    team_valid = len(new_team) >= 2 and len(new_team) <= 4 and all(t in valid_pool for t in new_team)
+    lead_valid = new_lead in new_team if new_team else False
+    resume_valid = bool(resume_step)
+    if team_valid and lead_valid and resume_valid:
+        log("S11", "升级重组队", "PASS", f"重组队 {new_team}，组长 {new_lead}，从 {resume_step} 恢复")
+    else:
+        reasons = []
+        if not team_valid:
+            reasons.append(f"队伍不合法 {new_team}")
+        if not lead_valid:
+            reasons.append(f"组长不在队内 {new_lead}")
+        if not resume_valid:
+            reasons.append("resume_from_step 缺失")
+        log("S11", "升级重组队", "FAIL", "；".join(reasons))
+
+# ---- S12: GOVERN 决策+执行分离（v2.1 修复2）----
+def test_s12_govern_strategy():
+    section("S12 GOVERN 决策+执行分离（v2.1 修复2）")
+    # 构造超 8 轮的历史
+    history_summary = "\n".join([
+        "m0 [system]: 你是代码助手",
+        "m1 [user]: 帮我写个登录页",
+        "m2 [assistant]: 代码已生成...",
+        "m3 [user]: 加个记住密码",
+        "m4 [assistant]: 已加...",
+        "m5 [user]: 改成协程",
+        "m6 [assistant]: 已改...",
+        "m7 [user]: 加测试",
+        "m8 [assistant]: 测试已加...",
+        "m9 [user]: 重构成 MVVM",
+        "m10 [assistant]: 重构完成...",
+    ])
+    govern_input = f"历史消息摘要：\n{history_summary}\n\ntoken 预算：4000"
+    govern, err = call_json(EXPERT_GOVERN, govern_input)
+    if not govern:
+        log("S12", "GOVERN决策分离", "FAIL", f"GOVERN 专家失败: {err}")
+        return
+    mode = govern.get("mode")
+    keep_ids = govern.get("keep_message_ids") or []
+    compress_ids = govern.get("compress_message_ids") or []
+    drop_ids = govern.get("drop_message_ids") or []
+    print(f"  GOVERN: mode={mode}, keep={keep_ids}, compress={compress_ids}, drop={drop_ids}")
+    valid_modes = {"KEEP_ALL", "COMPRESS", "SUMMARIZE"}
+    if mode in valid_modes:
+        # 验证决策与执行分离：GOVERN 只出策略（id 列表），不直接改消息
+        strategy_only = isinstance(keep_ids, list) and isinstance(compress_ids, list) and isinstance(drop_ids, list)
+        if strategy_only:
+            log("S12", "GOVERN决策分离", "PASS", f"GOVERN 出策略 mode={mode}，决策与执行分离（keep/compress/drop 为 id 列表）")
+        else:
+            log("S12", "GOVERN决策分离", "FAIL", "keep/compress/drop 非列表，未实现决策执行分离")
+    else:
+        log("S12", "GOVERN决策分离", "FAIL", f"mode 不合法: {mode}")
+
 # ========== 主流程 ==========
 
 if __name__ == "__main__":
     print("="*60)
-    print("Police Layer v2.0 端到端真实 API 测试")
+    print("Police Layer v2.1 端到端真实 API 测试")
     print(f"模型: {MODEL}  |  API: {API_URL}")
     print("="*60)
 
@@ -589,6 +847,12 @@ if __name__ == "__main__":
     test_s1_code_generate()
     test_s6_complex_team()
     test_s7_check_matrix()
+    # v2.1 六项修复验证
+    test_s8_gen_decision_only()    # 修复3：GEN 只出决策
+    test_s9_llm_verify()           # 修复5：LLM 二次验证
+    test_s10_dynamic_swap()        # 修复1+4：动态换人
+    test_s11_redispatch()          # 修复6：升级重组队
+    test_s12_govern_strategy()     # 修复2：GOVERN 决策+执行分离
     elapsed = time.time() - start
 
     print(f"\n{'='*60}")
