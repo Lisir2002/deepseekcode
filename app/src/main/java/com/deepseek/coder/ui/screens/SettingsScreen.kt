@@ -199,29 +199,6 @@ fun SettingsScreen(
                 )
             }
 
-            SectionCard("工作流编排 Orchestrator") {
-                Labeled("启用智能编排（意图分类 / 澄清 / 分步执行 / 自检）") {
-                    Switch(
-                        checked = s.orchestratorEnabled,
-                        onCheckedChange = viewModel::updateOrchestratorEnabled
-                    )
-                }
-                Labeled("自动追问澄清信息") {
-                    Switch(
-                        checked = s.clarificationsAutoAsk,
-                        onCheckedChange = viewModel::updateClarificationsAutoAsk
-                    )
-                }
-                Labeled("自检失败自动重试次数：${s.selfCheckMaxRetry}") {
-                    Slider(
-                        value = s.selfCheckMaxRetry.toFloat(),
-                        onValueChange = { viewModel.updateSelfCheckMaxRetry(it.toInt()) },
-                        valueRange = 0f..5f,
-                        steps = 4
-                    )
-                }
-            }
-
             SectionCard("用量统计") {
                 Labeled("累计 Token 用量") {
                     Text("${s.cumulativeTokens} tokens", fontWeight = FontWeight.SemiBold)

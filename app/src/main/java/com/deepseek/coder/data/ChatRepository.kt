@@ -96,39 +96,6 @@ class ChatRepository @Inject constructor(
             )
         }
 
-    /**
-     * Non-streaming call with a *pre-built* request DTO.  Used by Orchestrator for JSON-mode
-     * classification / decomposition / self-check where we need a custom response_format and
-     * do not want the standard system-prompt rewriting to kick in.
-     */
-    suspend fun sendChatBlockingJsonOverride(
-        req: ChatCompletionRequest
-    ): Outcome<Pair<ChatMessage, UsageSnapshot?>> = runCatching {
-        val resp = api.chatCompletions(req)
-        if (!resp.isSuccessful) return@runCatching Outcome.Failure(resp.errorToAppError())
-        val body = resp.body() ?: return@runCatching Outcome.Failure(AppError.Unknown("empty body"))
-        val choice = body.choices.first()
-        val msg = dtoToDomain(choice.message)
-        val usage = body.usage?.let { u ->
-            UsageSnapshot(
-                promptTokens = u.promptTokens,
-                completionTokens = u.completionTokens,
-                reasoningTokens = u.completionDetails?.reasoningTokens ?: 0,
-                totalTokens = u.totalTokens
-            )
-        }
-        Outcome.Success(msg to usage)
-    }.fold(
-        onSuccess = { it },
-        onFailure = { t ->
-            val err = when (t) {
-                is AppError -> t
-                else -> mapErr(t)
-            }
-            Outcome.Failure(err)
-        }
-    )
-
     companion object {
         internal fun buildRequest(
             messages: List<ChatMessage>,

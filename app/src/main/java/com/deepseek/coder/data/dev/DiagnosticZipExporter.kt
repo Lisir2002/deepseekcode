@@ -64,11 +64,7 @@ object DiagnosticZipExporter {
             SettingsSnap(
                 exported_at = nowIso(),
                 defaults = defaults,
-                datastore_snapshot_present = !snapshot.isNullOrBlank(),
-                effective_scope_tag = defaults.scopeTag,
-                effective_scope_hints = defaults.scopeHints,
-                effective_granularity = defaults.granularity.name,
-                rerank_enabled = defaults.rerankEnabled
+                datastore_snapshot_present = !snapshot.isNullOrBlank()
             )
         )
     }
@@ -77,11 +73,7 @@ object DiagnosticZipExporter {
     private data class SettingsSnap(
         val exported_at: String,
         val defaults: AppSettings,
-        val datastore_snapshot_present: Boolean,
-        val effective_scope_tag: String?,
-        val effective_scope_hints: List<String>,
-        val effective_granularity: String,
-        val rerank_enabled: Boolean
+        val datastore_snapshot_present: Boolean
     )
 
     // ---------- 2. chat_snapshot.json ----------

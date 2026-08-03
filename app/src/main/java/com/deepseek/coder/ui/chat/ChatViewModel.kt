@@ -13,11 +13,6 @@ import com.deepseek.coder.domain.models.ChatSession
 import com.deepseek.coder.domain.models.ChatStreamEvent
 import com.deepseek.coder.domain.models.UsageSnapshot
 import com.deepseek.coder.domain.usecases.SendChatStreamUseCase
-import com.deepseek.coder.domain.workflow.Orchestrator
-import com.deepseek.coder.domain.workflow.OrchestratorEvent
-import com.deepseek.coder.domain.workflow.WorkflowEvent
-import com.deepseek.coder.domain.workflow.WorkflowPlan
-import com.deepseek.coder.domain.workflow.WorkflowState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,13 +22,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.util.UUID
 import javax.inject.Inject
 
 @HiltViewModel
 class ChatViewModel @Inject constructor(
     private val sendStream: SendChatStreamUseCase,
-    private val orchestrator: Orchestrator,
     private val settingsRepository: SettingsRepository,
     private val sessionRepository: SessionRepository,
     savedStateHandle: SavedStateHandle
@@ -49,31 +42,15 @@ class ChatViewModel @Inject constructor(
         val error: String? = null,
         val thinkingExpanded: Boolean = false,
         val lastUsage: UsageSnapshot? = null,
-        val loading: Boolean = true,
-        // ---- Orchestrator UI state ----
-        val orchestratorEnabled: Boolean = true,
-        val workflowState: WorkflowState = WorkflowState.IDLE,
-        val classificationLabel: String? = null,
-        val plan: WorkflowPlan? = null,
-        val activeStepIndex: Int = -1,
-        val completedSteps: Set<Int> = emptySet(),
-        val selfCheckSummary: String? = null,
-        val clarifyingQuestions: List<String>? = null
+        val loading: Boolean = true
     ) {
         val canSend: Boolean get() = input.isNotBlank() && !streaming
         val canCancel: Boolean get() = streaming
-        val showWorkflowCard: Boolean
-            get() = orchestratorEnabled && (
-                    workflowState != WorkflowState.IDLE ||
-                            plan != null ||
-                            classificationLabel != null
-                    )
     }
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
-    /** Mirror settings so we always check orchestratorEnabled using latest preference value. */
     val settingsState = settingsRepository.settings.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
@@ -81,7 +58,6 @@ class ChatViewModel @Inject constructor(
     )
 
     private var streamingJob: Job? = null
-    private var currentRunId: String? = null
 
     init {
         viewModelScope.launch {
@@ -93,14 +69,13 @@ class ChatViewModel @Inject constructor(
                         it.copy(
                             sessionId = sessionId,
                             messages = existing,
-                            loading = false,
-                            orchestratorEnabled = settingsState.value.orchestratorEnabled
+                            loading = false
                         )
                     }
                     return@launch
                 }
             }
-            _state.update { it.copy(loading = false, orchestratorEnabled = settingsState.value.orchestratorEnabled) }
+            _state.update { it.copy(loading = false) }
         }
     }
 
@@ -110,13 +85,6 @@ class ChatViewModel @Inject constructor(
 
     fun toggleThinkingExpanded() {
         _state.update { it.copy(thinkingExpanded = !it.thinkingExpanded) }
-    }
-
-    /** Answer clarifying questions while the orchestrator is paused in CLARIFY_QUESTION state. */
-    fun answerClarifications(answers: List<String>) {
-        val runId = currentRunId ?: return
-        viewModelScope.launch { orchestrator.answerClarification(runId, answers) }
-        _state.update { it.copy(clarifyingQuestions = null) }
     }
 
     fun send() {
@@ -129,15 +97,7 @@ class ChatViewModel @Inject constructor(
                 messages = it.messages + userMsg + assistantPlaceholder,
                 input = "",
                 streaming = true,
-                error = null,
-                orchestratorEnabled = settingsState.value.orchestratorEnabled,
-                workflowState = WorkflowState.IDLE,
-                plan = null,
-                activeStepIndex = -1,
-                completedSteps = emptySet(),
-                classificationLabel = null,
-                selfCheckSummary = null,
-                clarifyingQuestions = null
+                error = null
             )
         }
         streamingJob = viewModelScope.launch {
@@ -150,26 +110,13 @@ class ChatViewModel @Inject constructor(
                 ?: sessionRepository.createSession()
             sessionRepository.saveSnapshot(session, msgs)
 
-            val useOrchestrator = settingsState.value.orchestratorEnabled
-            if (useOrchestrator) {
-                val runId = UUID.randomUUID().toString()
-                currentRunId = runId
-                orchestrator.run(runId, msgs, userMsg).collect { evt ->
-                    when (evt) {
-                        is WorkflowEvent.Orch -> consumeOrch(evt.event, session, msgs, effectiveSessionId, userMsg)
-                        is WorkflowEvent.Chat -> consumeChat(evt.event, effectiveSessionId)
-                    }
-                }
-            } else {
-                sendStream(msgs).collect { consumeChat(it, effectiveSessionId) }
-            }
+            sendStream(msgs).collect { consumeChat(it, effectiveSessionId) }
         }
     }
 
     fun cancel() {
         streamingJob?.cancel()
         streamingJob = null
-        currentRunId = null
         _state.update {
             val msgs = it.messages.toMutableList()
             if (msgs.isNotEmpty() && msgs.last().pending) {
@@ -178,9 +125,7 @@ class ChatViewModel @Inject constructor(
             persistSnapshot(msgs, it.sessionId)
             it.copy(
                 messages = msgs,
-                streaming = false,
-                workflowState = WorkflowState.IDLE,
-                clarifyingQuestions = null
+                streaming = false
             )
         }
     }
@@ -188,68 +133,6 @@ class ChatViewModel @Inject constructor(
     fun clearChat() {
         cancel()
         _state.update { it.copy(messages = emptyList(), error = null, lastUsage = null, sessionId = null) }
-    }
-
-    // -------------------------------------------------------------------------------
-    // Orchestrator event consumer
-    // -------------------------------------------------------------------------------
-    private fun consumeOrch(
-        evt: OrchestratorEvent,
-        session: ChatSession,
-        contextMsgs: List<ChatMessage>,
-        sessionId: String,
-        userMsg: ChatMessage
-    ) {
-        when (evt) {
-            is OrchestratorEvent.Started -> Unit
-            is OrchestratorEvent.StateTransition -> _state.update { it.copy(workflowState = evt.to) }
-            is OrchestratorEvent.Classification -> _state.update {
-                it.copy(
-                    classificationLabel = evt.value.intent.display +
-                            " (%.0f%%)".format(evt.value.confidence * 100f)
-                )
-            }
-            is OrchestratorEvent.ClarifyQuestion -> _state.update {
-                it.copy(clarifyingQuestions = evt.questions)
-            }
-            is OrchestratorEvent.PlanProduced -> _state.update { it.copy(plan = evt.plan) }
-            is OrchestratorEvent.StepStarted -> _state.update { it.copy(activeStepIndex = evt.step.index) }
-            is OrchestratorEvent.StepFinished -> _state.update { s ->
-                s.copy(completedSteps = s.completedSteps + evt.step.index)
-            }
-            is OrchestratorEvent.SelfCheck -> _state.update { s ->
-                s.copy(
-                    selfCheckSummary = if (evt.result.pass) "通过"
-                    else "发现问题：${evt.result.issues.take(2).joinToString(" / ").take(80)}"
-                )
-            }
-            is OrchestratorEvent.ContextTrimmed -> Unit
-            is OrchestratorEvent.Completed -> {
-                val final = evt.finalAssistant
-                if (final.text.isNotBlank()) {
-                    _state.update { old ->
-                        val msgs = old.messages.toMutableList()
-                        // Replace pending assistant placeholder (should be last) with the completed message.
-                        val lastIdx = msgs.indexOfLast { it.role == ChatRole.ASSISTANT }
-                        if (lastIdx >= 0) {
-                            msgs[lastIdx] = final.copy(pending = false)
-                        } else {
-                            msgs.add(final)
-                        }
-                        persistSnapshot(msgs, sessionId)
-                        old.copy(messages = msgs)
-                    }
-                }
-                _state.update { it.copy(streaming = false, workflowState = WorkflowState.DONE) }
-            }
-            is OrchestratorEvent.Failed -> _state.update {
-                it.copy(
-                    streaming = false,
-                    workflowState = WorkflowState.FAILURE,
-                    error = evt.error.message?.take(200) ?: "orchestrator failed"
-                )
-            }
-        }
     }
 
     // -------------------------------------------------------------------------------
@@ -270,7 +153,6 @@ class ChatViewModel @Inject constructor(
                     persistSnapshot(msgs, sessionId)
                     if (event.usage != null) {
                         viewModelScope.launch {
-                            // Fallback: SettingsRepository now exposes accumulateTokens() via new helper
                             runCatching { settingsRepository.accumulateTokens(event.usage.totalTokens.toLong()) }
                             sessionRepository.touchAndAddTokens(sessionId, event.usage.totalTokens.toLong())
                         }

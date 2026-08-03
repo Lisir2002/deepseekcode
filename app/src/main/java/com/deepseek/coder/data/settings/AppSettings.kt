@@ -21,16 +21,7 @@ data class AppSettings(
     val baseUrl: String = DEFAULT_BASE_URL,
     val betaBaseUrl: String = DEFAULT_BETA_BASE_URL,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    val cumulativeTokens: Long = 0L,
-    // ---- Orchestrator settings (v1.1) ----
-    val orchestratorEnabled: Boolean = true,
-    val selfCheckMaxRetry: Int = 1,
-    val clarificationsAutoAsk: Boolean = true,
-    // ---- Planner granularity + scope (v1.2) ----
-    val granularity: Granularity = Granularity.MEDIUM,
-    val rerankEnabled: Boolean = true,
-    val scopeTag: String? = null,
-    val scopeHints: List<String> = emptyList()
+    val cumulativeTokens: Long = 0L
 ) {
     enum class DeepSeekModel(val id: String, val display: String) {
         V4_FLASH("deepseek-v4-flash", "V4 Flash（高并发 / 快速响应）"),
@@ -38,17 +29,6 @@ data class AppSettings(
 
         companion object {
             fun fromId(id: String?): DeepSeekModel = entries.firstOrNull { it.id == id } ?: V4_FLASH
-        }
-    }
-
-    enum class Granularity(val display: String) {
-        COARSE("粗粒度（里程碑级）"),
-        MEDIUM("中粒度（子任务级）"),
-        FINE("细粒度（步骤级）");
-
-        companion object {
-            fun fromGranularity(v: String?): Granularity =
-                entries.firstOrNull { it.name.equals(v, ignoreCase = true) } ?: MEDIUM
         }
     }
 
@@ -70,16 +50,5 @@ data class AppSettings(
             "你是一个资深软件工程师助手 DeepCoder，专注于编写、审查、重构代码。" +
                     "输出代码前请先说明思路。代码需要附带注释并遵循语言惯用风格。" +
                     "涉及危险操作（rm -rf、生产数据库写操作等）必须给出醒目警告。"
-
-        const val SCOPE_ANDROID_KOTLIN = "ANDROID_KOTLIN"
-        const val SCOPE_WEB_FRONTEND = "WEB_FRONTEND"
-        const val SCOPE_GENERAL = "GENERAL"
-
-        fun fromScope(v: String?): String? = when (v?.uppercase()) {
-            SCOPE_ANDROID_KOTLIN -> SCOPE_ANDROID_KOTLIN
-            SCOPE_WEB_FRONTEND -> SCOPE_WEB_FRONTEND
-            SCOPE_GENERAL -> SCOPE_GENERAL
-            else -> null
-        }
     }
 }

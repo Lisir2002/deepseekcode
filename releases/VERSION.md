@@ -1,5 +1,28 @@
 # DeepCoder 发布记录
 
+## v1.5.0 (2026-08-03) · 移除 Orchestrator 工作流编排，回归直通流式聊天
+
+### 重大架构回退
+- 🧹 **移除 Orchestrator 工作流编排模块**：删除整个 workflow 目录 + 进度卡片 + 澄清面板 + 相关设置项
+- ChatViewModel 回归最简单的「用户消息 → API → 流式返回」单轮直通，不再有意图分类/澄清追问/分步执行/自检重试
+- 原因：工作流编排在实际使用中效果不达预期，且增加调用链路与 API 开销，决定移除以简化架构
+
+### 移除的组件
+- `data/workflow/`（OrchestratorImpl / ContextGovernor / prompts / WorkflowPrompts）
+- `domain/workflow/`（Orchestrator 接口 / WorkflowModels）
+- `di/WorkflowModule.kt`（DI 绑定）
+- `ui/components/WorkflowProgressCard.kt`（进度卡片）
+- ChatScreen 的 ClarificationPanel（澄清面板）
+- AppSettings 的 orchestratorEnabled / selfCheckMaxRetry / clarificationsAutoAsk / granularity / rerankEnabled / scopeTag / scopeHints 字段 + Granularity 枚举
+- SettingsRepository / SettingsRepositoryEx / SettingsViewModel / SettingsScreen 对应设置项
+- ChatRepository.sendChatBlockingJsonOverride（孤儿方法）
+- DiagnosticZipExporter 的 planner 诊断字段
+- OrchestratorUnitTest（测试已失效）
+
+### 保留
+- 直通流式聊天核心（SendChatStreamUseCase + ChatViewModel.consumeChat）
+- 会话管理、Token 累计、设置页其余项
+
 ## v1.4.0 (2026-08-03) · 移除警察专家系统，回归通用 Orchestrator
 
 ### 重大架构回退

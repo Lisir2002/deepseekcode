@@ -68,7 +68,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.deepseek.coder.domain.models.ChatMessage
 import com.deepseek.coder.domain.models.ChatRole
 import com.deepseek.coder.ui.chat.ChatViewModel
-import com.deepseek.coder.ui.components.WorkflowProgressCard
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -183,27 +182,6 @@ fun ChatScreen(
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            if (ui.showWorkflowCard) {
-                WorkflowProgressCard(
-                    state = ui.workflowState,
-                    classification = ui.classificationLabel,
-                    plan = ui.plan,
-                    activeStepIndex = ui.activeStepIndex,
-                    completedSteps = ui.completedSteps,
-                    selfCheckSummary = ui.selfCheckSummary,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                )
-            }
-
-            if (!ui.clarifyingQuestions.isNullOrEmpty()) {
-                ClarificationPanel(
-                    questions = ui.clarifyingQuestions!!,
-                    onSubmit = viewModel::answerClarifications
-                )
-            }
-
             if (ui.messages.isEmpty()) {
                 EmptyStateHint(Modifier.fillMaxSize())
             } else {
@@ -452,49 +430,5 @@ private fun parseMessageSegments(text: String): List<Segment> {
     return result.ifEmpty { listOf(Segment.Text(text)) }
 }
 
-@Composable
-private fun ClarificationPanel(
-    questions: List<String>,
-    onSubmit: (List<String>) -> Unit
-) {
-    val answers = remember(questions) {
-        Array(questions.size) { mutableStateOf("") }
-    }
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer
-        ),
-        shape = RoundedCornerShape(14.dp)
-    ) {
-        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                "请补充信息以便我更好地帮你处理：",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onTertiaryContainer
-            )
-            questions.forEachIndexed { i, q ->
-                OutlinedTextField(
-                    value = answers[i].value,
-                    onValueChange = { answers[i].value = it },
-                    label = { Text(q.take(60)) },
-                    maxLines = 3,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                androidx.compose.material3.Button(
-                    onClick = {
-                        onSubmit(answers.map { it.value })
-                    }
-                ) {
-                    Text("提交")
-                }
-            }
-        }
-    }
-}
 
 

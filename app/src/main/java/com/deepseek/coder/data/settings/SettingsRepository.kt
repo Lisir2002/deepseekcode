@@ -10,19 +10,14 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.deepseek.coder.data.credentials.CredentialRepository
 import com.deepseek.coder.data.settings.AppSettings.DeepSeekModel
-import com.deepseek.coder.data.settings.AppSettings.Granularity
 import com.deepseek.coder.data.settings.AppSettings.ReasoningEffort
 import com.deepseek.coder.data.settings.AppSettings.ThemeMode
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
 
-@OptIn(ExperimentalCoroutinesApi::class)
 @Singleton
 class SettingsRepository @Inject constructor(
     private val store: DataStore<Preferences>,
@@ -43,14 +38,11 @@ class SettingsRepository @Inject constructor(
         val BETA_BASE_URL = stringPreferencesKey("beta_base_url")
         val THEME = stringPreferencesKey("theme_mode")
         val CUMULATIVE_TOKENS = longPreferencesKey("cumulative_tokens")
-        val ORCH_ENABLED = booleanPreferencesKey("orch_enabled")
-        val SELF_CHECK_MAX_RETRY = intPreferencesKey("self_check_max_retry")
-        val CLARIFICATIONS_AUTO_ASK = booleanPreferencesKey("clarifications_auto_ask")
     }
 
     private val defaults = AppSettings()
 
-    private val baseSettings: Flow<AppSettings> = store.data.map { p ->
+    val settings: Flow<AppSettings> = store.data.map { p ->
         AppSettings(
             model = DeepSeekModel.fromId(p[Keys.MODEL]),
             temperature = p[Keys.TEMPERATURE] ?: defaults.temperature,
@@ -65,31 +57,8 @@ class SettingsRepository @Inject constructor(
             baseUrl = p[Keys.BASE_URL] ?: defaults.baseUrl,
             betaBaseUrl = p[Keys.BETA_BASE_URL] ?: defaults.betaBaseUrl,
             themeMode = p[Keys.THEME]?.let(ThemeMode::valueOf) ?: defaults.themeMode,
-            cumulativeTokens = p[Keys.CUMULATIVE_TOKENS] ?: 0L,
-            orchestratorEnabled = p[Keys.ORCH_ENABLED] ?: defaults.orchestratorEnabled,
-            selfCheckMaxRetry = p[Keys.SELF_CHECK_MAX_RETRY] ?: defaults.selfCheckMaxRetry,
-            clarificationsAutoAsk = p[Keys.CLARIFICATIONS_AUTO_ASK] ?: defaults.clarificationsAutoAsk
+            cumulativeTokens = p[Keys.CUMULATIVE_TOKENS] ?: 0L
         )
-    }
-
-    private val granularityState = MutableStateFlow(defaults.granularity)
-    private val rerankEnabledState = MutableStateFlow(defaults.rerankEnabled)
-    private val scopeTagState = MutableStateFlow<String?>(defaults.scopeTag)
-    private val scopeHintsState = MutableStateFlow<List<String>>(defaults.scopeHints)
-
-    val granularity: Flow<Granularity> = granularityState
-    val rerankEnabled: Flow<Boolean> = rerankEnabledState
-    val scopeTag: Flow<String?> = scopeTagState
-    val scopeHints: Flow<List<String>> = scopeHintsState
-
-    val settings: Flow<AppSettings> = combine(
-        baseSettings,
-        granularityState,
-        rerankEnabledState,
-        scopeTagState,
-        scopeHintsState
-    ) { base, g, rr, st, sh ->
-        base.copy(granularity = g, rerankEnabled = rr, scopeTag = st, scopeHints = sh)
     }
 
     suspend fun current(): AppSettings = settings.first()
@@ -110,24 +79,12 @@ class SettingsRepository @Inject constructor(
             p[Keys.BETA_BASE_URL] = value.betaBaseUrl
             p[Keys.THEME] = value.themeMode.name
             p[Keys.CUMULATIVE_TOKENS] = value.cumulativeTokens
-            p[Keys.ORCH_ENABLED] = value.orchestratorEnabled
-            p[Keys.SELF_CHECK_MAX_RETRY] = value.selfCheckMaxRetry
-            p[Keys.CLARIFICATIONS_AUTO_ASK] = value.clarificationsAutoAsk
         }
-        granularityState.value = value.granularity
-        rerankEnabledState.value = value.rerankEnabled
-        scopeTagState.value = value.scopeTag
-        scopeHintsState.value = value.scopeHints
     }
 
     suspend fun update(transform: (AppSettings) -> AppSettings) {
         update(transform(current()))
     }
-
-    suspend fun updateGranularity(v: Granularity) = update { it.copy(granularity = v) }
-    suspend fun updateRerankEnabled(v: Boolean) = update { it.copy(rerankEnabled = v) }
-    suspend fun updateScopeTag(v: String?) = update { it.copy(scopeTag = AppSettings.fromScope(v)) }
-    suspend fun updateScopeHints(v: List<String>) = update { it.copy(scopeHints = v) }
 
     suspend fun setApiKey(key: String) { credentials.setApiKey(key).getOrThrow() }
     suspend fun getApiKey(): String = credentials.getApiKeyNow().orEmpty()
