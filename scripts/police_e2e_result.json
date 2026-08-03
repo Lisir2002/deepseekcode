@@ -1,0 +1,49 @@
+{
+  "passed": 7,
+  "failed": 0,
+  "elapsed_s": 21.8,
+  "results": [
+    {
+      "id": "S4",
+      "name": "高危词硬拦截",
+      "status": "PASS",
+      "detail": "L1 硬规则正确拦截，未消耗 API"
+    },
+    {
+      "id": "S2",
+      "name": "闲聊拒答",
+      "status": "PASS",
+      "detail": "正确判定 GENERAL_CHAT 并给出引导话术"
+    },
+    {
+      "id": "S3",
+      "name": "澄清流程",
+      "status": "PASS",
+      "detail": "成功生成 3 个澄清问题"
+    },
+    {
+      "id": "S5",
+      "name": "软磨硬泡",
+      "status": "PASS",
+      "detail": "维持 GENERAL_CHAT 拒答，未妥协"
+    },
+    {
+      "id": "S1",
+      "name": "代码生成流程",
+      "status": "PASS",
+      "detail": "路由→组队→计划→GEN→Actor→CHECK 全链路通过"
+    },
+    {
+      "id": "S6",
+      "name": "复杂任务组队",
+      "status": "PASS",
+      "detail": "正确组队 4 人，ARCH 任组长"
+    },
+    {
+      "id": "S7",
+      "name": "自检决策矩阵",
+      "status": "PASS",
+      "detail": "L1 硬规则正确强制 BLOCKED"
+    }
+  ]
+}
