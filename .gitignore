@@ -15,13 +15,10 @@ captures/
 .externalNativeBuild/
 .cxx/
 .caches/
-
 # Kotlin
 *.hprof
-
 # Room schemas (optional, keep if want versioned)
 # app/schemas/
-
 # APK / AAB
 *.apk
 *.aab
@@ -29,19 +26,31 @@ captures/
 *.idsig
 # 例外：release 目录永远保持不忽略（用于发布成品 APK + SHA）
 !releases/**
-
 # Keystore
 *.keystore
 *.jks
 *.p12
 signing.properties
-
 # macOS / Windows
 .DS_Store
 Thumbs.db
-
 # Logs
 *.log
 logcat.txt
 nohup.out
 /tmp/
+# TRAE local env
+android-sdk/
+!**/src/**/build/
+**/venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.log
+releases/*.bundle
+releases/*.tar.gz
+artifacts/planner_20k_e2e/adapter_model.safetensors
+planner-20k-installer-v1.0.0/outputs/latest/adapter_model.safetensors
+planner-20k-installer-v1.0.0/build/reports/*/saves-peft/adapter_model.safetensors
+planner-20k-RESULTS-v1.0.2/*/adapter_model.safetensors
+planner-20k-RESULTS-v1.0.2/*.tar.gz
