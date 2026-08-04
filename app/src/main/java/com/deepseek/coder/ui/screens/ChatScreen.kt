@@ -344,6 +344,15 @@ private fun MessageBubble(
     }
 }
 
+/**
+ * 思考中状态文案（区分阶段，让用户知道模型在做什么而非"卡住"）。
+ */
+private fun thinkingStatusLabel(reasoning: String?, pending: Boolean): String? {
+    if (!pending) return null
+    return if (!reasoning.isNullOrBlank()) "思考中（${reasoning.length} 字）…"
+    else "等待模型响应…"
+}
+
 @Composable
 private fun UserBubble(m: ChatMessage) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -371,12 +380,14 @@ private fun AssistantBubble(
     toolCalls: List<ChatViewModel.ToolCallRecord>
 ) {
     val skill = m.skillId?.let { sid -> availableSkills.firstOrNull { it.id == sid } }
+    // 流式期间 reasoning 正在输出时自动展开思考卡片，让用户看到实时进度（避免"卡住"体感）
+    val effectiveExpanded = thinkingExpanded || (m.pending && !m.reasoning.isNullOrBlank())
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         // 工具调用折叠卡片（SPEC §6.2 决策 5/15，位于最终文本上方）
         toolCalls.forEach { record -> ToolCallCard(record) }
 
         if (!m.reasoning.isNullOrBlank()) {
-            ThinkingFoldCard(reasoning = m.reasoning, expanded = thinkingExpanded, onToggle = onToggle)
+            ThinkingFoldCard(reasoning = m.reasoning, expanded = effectiveExpanded, onToggle = onToggle)
         }
         if (m.text.isNotBlank()) {
             ElevatedCard(
@@ -388,9 +399,11 @@ private fun AssistantBubble(
                 }
             }
         } else if (m.pending && toolCalls.isEmpty()) {
+            // 区分阶段：reasoning 已输出时显示字数进度，否则显示"等待响应"
+            val label = thinkingStatusLabel(m.reasoning, m.pending) ?: "模型思考中…"
             AssistChip(
                 onClick = {},
-                label = { Text("模型思考中…", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                label = { Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant) },
                 leadingIcon = { CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp) }
             )
         }

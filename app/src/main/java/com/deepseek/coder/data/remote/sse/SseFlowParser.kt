@@ -82,7 +82,12 @@ class SseFlowParser @Inject constructor(
                 totalTokens = u.totalTokens
             )
         }
-        val finishReason = chunks.lastOrNull()?.choices?.lastOrNull()?.finishReason ?: "stop"
+        // 修复：从最后一个含非空 finish_reason 的 chunk 取，避免被末尾 usage chunk
+        // （choices 为空）干扰导致退化为 "stop"，掩盖真实的 "length"（思考用满 token）等情况
+        val finishReason = chunks.asReversed()
+            .firstOrNull { chunk -> chunk.choices.any { it.finishReason != null } }
+            ?.choices?.lastOrNull { it.finishReason != null }?.finishReason
+            ?: "stop"
         emit(ChatStreamEvent.Finish(finishReason, usage))
     }
 

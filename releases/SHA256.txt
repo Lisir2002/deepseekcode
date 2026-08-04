@@ -5,4 +5,4 @@ df12c04b235f169a3176fea60abdbd1a243acebbf434ce6a4c5c3e6eea4d4ae2  DeepCoder-v1.1
 29195393e197f31eba71e481efcc1fc21e419598efce1b933037a6489645fc33  DeepCoder-v1.2.0-debug.apk
 04ce0e2d019ef77139be6ff9a6e8a1ffed4c02c8328eba4997933eac00eccffe  DeepCoder-v1.3.0-debug.apk
 0efd89f1117acf7c075e370743f88fbfae17bb24c88dc83e2778af240bf61b80  DeepCoder-v1.4.0-debug.apk
-57aa9d2de235b563e997829b04e89e290ce7b631e8ced61756b6fa18c9e9d221  DeepCoder-v1.5.0-debug.apk
+c1ae4814f0e7de5f80af2194445ad6748a68452aa2cf1d9c7802884a4201f744  DeepCoder-v1.5.0-debug.apk

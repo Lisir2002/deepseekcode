@@ -11,7 +11,7 @@ data class AppSettings(
     val model: DeepSeekModel = DeepSeekModel.V4_FLASH,
     val temperature: Float = 0.2f,
     val topP: Float = 0.95f,
-    val maxTokens: Int = 4096,
+    val maxTokens: Int = 8192,
     val reasoningEffort: ReasoningEffort = ReasoningEffort.HIGH,
     val thinkingEnabled: Boolean = true,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
