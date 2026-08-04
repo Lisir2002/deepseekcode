@@ -58,6 +58,13 @@ interface ChatDao {
     @Query("SELECT COUNT(*) FROM chat_messages WHERE sessionId = :sessionId")
     suspend fun countMessages(sessionId: String): Int
 
+    /** 全表 LIKE 模糊搜索（search_history 工具用，§4.2）。 */
+    @Query(
+        "SELECT * FROM chat_messages WHERE text LIKE '%' || :query || '%' " +
+            "AND role IN ('USER','ASSISTANT') ORDER BY timestampMs DESC LIMIT :limit"
+    )
+    suspend fun searchMessages(query: String, limit: Int): List<ChatMessageEntity>
+
     @Transaction
     suspend fun upsertSessionWithMessages(
         session: ChatSessionEntity,

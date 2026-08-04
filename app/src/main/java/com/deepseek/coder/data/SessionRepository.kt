@@ -31,7 +31,11 @@ class SessionRepository @Inject constructor(
     suspend fun getSession(sessionId: String): ChatSession? =
         chatDao.getSession(sessionId)?.toDomain()
 
-    suspend fun createSession(title: String? = null, systemPrompt: String? = null): ChatSession {
+    suspend fun createSession(
+        title: String? = null,
+        systemPrompt: String? = null,
+        currentSkillId: String? = null
+    ): ChatSession {
         val id = "s_${UUID.randomUUID().toString().replace("-", "").take(16)}"
         val now = System.currentTimeMillis()
         val session = ChatSession(
@@ -41,10 +45,21 @@ class SessionRepository @Inject constructor(
             createdAtMs = now,
             updatedAtMs = now,
             messageCount = 0,
-            cumulativeTokens = 0L
+            cumulativeTokens = 0L,
+            currentSkillId = currentSkillId
         )
         chatDao.insertSession(session.toEntity())
         return session
+    }
+
+    /** Skill 系统：更新会话当前 skill id（持久化，切换 skill 时调用）。 */
+    suspend fun updateCurrentSkillId(sessionId: String, skillId: String?) {
+        val session = chatDao.getSession(sessionId) ?: return
+        runCatching {
+            chatDao.updateSession(session.copy(currentSkillId = skillId))
+        }.onFailure {
+            AppLogger.w(it, "updateCurrentSkillId failed for session %s", sessionId)
+        }
     }
 
     suspend fun saveSnapshot(session: ChatSession, messages: List<ChatMessage>) {
@@ -83,6 +98,10 @@ class SessionRepository @Inject constructor(
         runCatching { chatDao.deleteAllSessions() }
             .onFailure { AppLogger.w(it, "deleteAllSessions failed") }
     }
+
+    /** search_history 工具用：跨所有会话 LIKE 搜索消息（§4.2）。 */
+    suspend fun searchMessages(query: String, limit: Int = 10): List<ChatMessage> =
+        chatDao.searchMessages(query, limit).map { it.toDomain() }
 
     private fun deriveTitle(messages: List<ChatMessage>): String {
         val firstUser = messages.firstOrNull { it.role == com.deepseek.coder.domain.models.ChatRole.USER }

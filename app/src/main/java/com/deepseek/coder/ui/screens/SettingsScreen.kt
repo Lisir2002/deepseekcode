@@ -114,16 +114,22 @@ fun SettingsScreen(
             }
 
             SectionCard("思考模式（Reasoning）") {
-                Labeled("启用 reasoning_content") {
+                Labeled("启用 thinking（开启后模型先输出思维链再给答案）") {
                     Switch(checked = s.thinkingEnabled, onCheckedChange = viewModel::updateThinkingEnabled)
                 }
-                Labeled("推理 effort") {
+                Labeled("推理 effort（仅思考模式生效，high/max）") {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         ReasoningEffort.entries.forEach { effort ->
                             FilterChip(
                                 selected = s.reasoningEffort == effort,
                                 onClick = { viewModel.updateEffort(effort) },
-                                label = { Text(if (effort == ReasoningEffort.DISABLED) "关闭" else effort.value) }
+                                label = {
+                                    Text(when (effort) {
+                                        ReasoningEffort.HIGH -> "high"
+                                        ReasoningEffort.MAX -> "max"
+                                        ReasoningEffort.DISABLED -> "关闭"
+                                    })
+                                }
                             )
                         }
                     }

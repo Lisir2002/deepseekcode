@@ -27,5 +27,6 @@ data class ChatMessageEntity(
     val toolCallId: String? = null,
     val timestampMs: Long = System.currentTimeMillis(),
     val pending: Boolean = false,
-    val sortOrder: Int = 0
+    val sortOrder: Int = 0,
+    val skillId: String? = null
 )

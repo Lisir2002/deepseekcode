@@ -16,4 +16,8 @@ sealed class DeepCoderScreens(val route: String) {
     object Editor : DeepCoderScreens("editor")
     object SessionList : DeepCoderScreens("sessions")
     object Settings : DeepCoderScreens("settings")
+    object SkillManagement : DeepCoderScreens("skills")
+    object SkillEditor : DeepCoderScreens("skill_editor/{skillId}") {
+        fun route(skillId: String = "new"): String = "skill_editor/$skillId"
+    }
 }

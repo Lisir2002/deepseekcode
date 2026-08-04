@@ -20,7 +20,8 @@ fun ChatSessionEntity.toDomain(): ChatSession =
         createdAtMs = createdAtMs,
         updatedAtMs = updatedAtMs,
         messageCount = messageCount,
-        cumulativeTokens = cumulativeTokens
+        cumulativeTokens = cumulativeTokens,
+        currentSkillId = currentSkillId
     )
 
 fun ChatSession.toEntity(): ChatSessionEntity =
@@ -31,7 +32,8 @@ fun ChatSession.toEntity(): ChatSessionEntity =
         createdAtMs = createdAtMs,
         updatedAtMs = updatedAtMs,
         messageCount = messageCount,
-        cumulativeTokens = cumulativeTokens
+        cumulativeTokens = cumulativeTokens,
+        currentSkillId = currentSkillId
     )
 
 // ---- Message mappers ----
@@ -48,7 +50,8 @@ fun ChatMessageEntity.toDomain(): ChatMessage {
         toolCalls = toolCalls,
         toolCallId = toolCallId,
         timestampMs = timestampMs,
-        pending = pending
+        pending = pending,
+        skillId = skillId
     )
 }
 
@@ -66,6 +69,7 @@ fun ChatMessage.toEntity(sessionId: String, sortOrder: Int): ChatMessageEntity {
         toolCallId = this.toolCallId,
         timestampMs = this.timestampMs,
         pending = this.pending,
-        sortOrder = sortOrder
+        sortOrder = sortOrder,
+        skillId = this.skillId
     )
 }

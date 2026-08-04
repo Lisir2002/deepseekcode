@@ -17,6 +17,8 @@ import com.deepseek.coder.ui.screens.EditorScreen
 import com.deepseek.coder.ui.screens.SessionListScreen
 import com.deepseek.coder.ui.screens.SetupScreen
 import com.deepseek.coder.ui.screens.SettingsScreen
+import com.deepseek.coder.ui.screens.SkillManagementScreen
+import com.deepseek.coder.ui.screens.UserSkillEditorScreen
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.SharingStarted
@@ -57,7 +59,8 @@ fun DeepCoderNavGraph(
                 sessionId = sessionId,
                 onNavigateToEditor = { navController.navigate(DeepCoderScreens.Editor.route) },
                 onNavigateToSessions = { navController.navigate(DeepCoderScreens.SessionList.route) },
-                onNavigateToSettings = { navController.navigate(DeepCoderScreens.Settings.route) }
+                onNavigateToSettings = { navController.navigate(DeepCoderScreens.Settings.route) },
+                onNavigateToSkills = { navController.navigate(DeepCoderScreens.SkillManagement.route) }
             )
         }
 
@@ -77,6 +80,27 @@ fun DeepCoderNavGraph(
 
         composable(DeepCoderScreens.Settings.route) {
             SettingsScreen()
+        }
+
+        composable(DeepCoderScreens.SkillManagement.route) {
+            SkillManagementScreen(
+                onBack = { navController.popBackStack() },
+                onNavigateToEditor = { skillId ->
+                    navController.navigate(DeepCoderScreens.SkillEditor.route(skillId))
+                }
+            )
+        }
+
+        composable(
+            route = DeepCoderScreens.SkillEditor.route,
+            arguments = listOf(navArgument("skillId") {
+                type = NavType.StringType; defaultValue = "new"
+            })
+        ) {
+            UserSkillEditorScreen(
+                onBack = { navController.popBackStack() },
+                onDone = { navController.popBackStack() }
+            )
         }
     }
 }

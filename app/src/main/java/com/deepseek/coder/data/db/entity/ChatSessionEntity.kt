@@ -11,5 +11,6 @@ data class ChatSessionEntity(
     val createdAtMs: Long = System.currentTimeMillis(),
     val updatedAtMs: Long = createdAtMs,
     val messageCount: Int = 0,
-    val cumulativeTokens: Long = 0L
+    val cumulativeTokens: Long = 0L,
+    val currentSkillId: String? = null
 )

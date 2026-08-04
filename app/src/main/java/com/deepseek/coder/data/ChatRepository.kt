@@ -8,6 +8,7 @@ import com.deepseek.coder.data.remote.dto.ChatCompletionRequest
 import com.deepseek.coder.data.remote.dto.ChatMessageDto
 import com.deepseek.coder.data.remote.dto.ChatResponseMessageDto
 import com.deepseek.coder.data.remote.dto.StreamOptionsDto
+import com.deepseek.coder.data.remote.dto.ThinkingDto
 import com.deepseek.coder.data.remote.dto.ToolCallDto
 import com.deepseek.coder.data.remote.dto.FunctionCallDto
 import com.deepseek.coder.data.remote.sse.SseFlowParser
@@ -36,11 +37,12 @@ class ChatRepository @Inject constructor(
 
     suspend fun sendChat(
         messages: List<ChatMessage>,
-        overrideSettings: (suspend (AppSettings) -> AppSettings)? = null
+        overrideSettings: (suspend (AppSettings) -> AppSettings)? = null,
+        tools: List<com.deepseek.coder.data.remote.dto.ToolDto>? = null
     ): Flow<ChatStreamEvent> {
         val settings = overrideSettings?.invoke(settingsRepository.current())
             ?: settingsRepository.current()
-        val req = buildRequest(messages, settings, stream = true)
+        val req = buildRequest(messages, settings, stream = true, tools = tools)
         return kotlinx.coroutines.flow.flow {
             val response = try {
                 api.chatCompletionsStream(req)
@@ -100,7 +102,8 @@ class ChatRepository @Inject constructor(
         internal fun buildRequest(
             messages: List<ChatMessage>,
             settings: AppSettings,
-            stream: Boolean
+            stream: Boolean,
+            tools: List<com.deepseek.coder.data.remote.dto.ToolDto>? = null
         ): ChatCompletionRequest {
             val systemMsgs = buildList {
                 if (settings.systemPrompt.isNotBlank()) {
@@ -108,27 +111,22 @@ class ChatRepository @Inject constructor(
                 }
             }
             val msgs = (systemMsgs + messages).map { domainToDto(it) }
-            val thinkingBudget: Int? = if (settings.thinkingEnabled && settings.reasoningEffort.enabled()) {
-                // Derive budget from max_tokens so effort maps consistently per DeepSeek docs:
-                //  - low: max_tokens * 0.25,  medium: max_tokens * 0.5,  high: max_tokens * 1.0
-                val ratio = when (settings.reasoningEffort) {
-                    AppSettings.ReasoningEffort.LOW -> 0.25
-                    AppSettings.ReasoningEffort.MEDIUM -> 0.5
-                    AppSettings.ReasoningEffort.HIGH -> 1.0
-                    else -> 0.0
-                }
-                if (ratio > 0) (settings.maxTokens * ratio).toInt().coerceAtLeast(512) else null
-            } else null
+            val thinkingOn = settings.thinkingEnabled
             return ChatCompletionRequest(
                 model = settings.model.id,
                 messages = msgs,
-                temperature = settings.temperature,
-                top_p = settings.topP,
+                // 官方文档：思考模式不支持 temperature/top_p（不报错但不生效），仅在非思考模式传
+                temperature = if (thinkingOn) null else settings.temperature,
+                top_p = if (thinkingOn) null else settings.topP,
                 max_tokens = settings.maxTokens,
                 stream = stream,
                 streamOptions = if (stream) StreamOptionsDto(include_usage = true) else null,
-                reasoningEffort = settings.reasoningEffort.value.takeIf { it.isNotEmpty() },
-                thinkingBudget = thinkingBudget
+                // 显式传 thinking 开关（官方默认 enabled，显式便于关闭）
+                thinking = ThinkingDto(if (thinkingOn) "enabled" else "disabled"),
+                // reasoning_effort 仅在思考模式下有意义；high/max 有效，low/medium/xhigh 会被映射
+                reasoningEffort = if (thinkingOn && settings.reasoningEffort.enabled())
+                    settings.reasoningEffort.value else null,
+                tools = tools
             )
         }
 
@@ -136,7 +134,10 @@ class ChatRepository @Inject constructor(
             ChatMessageDto(
                 role = m.role.value,
                 content = m.text.takeIf { it.isNotEmpty() },
-                reasoningContent = m.reasoning?.takeIf { it.isNotEmpty() },
+                // 官方文档多轮拼接规则：两个 user 之间若 assistant 未做工具调用，
+                // 其 reasoning_content 会被服务端忽略，故不传以省 token；
+                // 做了工具调用的 assistant 消息的 reasoning_content 需参与拼接。
+                reasoningContent = m.reasoning?.takeIf { it.isNotEmpty() && m.toolCalls.isNotEmpty() },
                 toolCalls = m.toolCalls.takeIf { it.isNotEmpty() }?.map { t ->
                     ToolCallDto(id = t.id, function = FunctionCallDto(name = t.name, arguments = t.argumentsJson))
                 },

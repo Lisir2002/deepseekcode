@@ -18,7 +18,9 @@ data class ChatMessage(
     val toolCalls: List<ToolCall> = emptyList(),
     val toolCallId: String? = null,
     val timestampMs: Long = System.currentTimeMillis(),
-    val pending: Boolean = false
+    val pending: Boolean = false,
+    /** Skill 系统标识：生成该消息的 skill id（USER 消息可为空）。UI 渲染 skill tag chip。 */
+    val skillId: String? = null
 )
 
 data class ToolCall(
@@ -34,7 +36,9 @@ data class ChatSession(
     val createdAtMs: Long = System.currentTimeMillis(),
     val updatedAtMs: Long = createdAtMs,
     val messageCount: Int = 0,
-    val cumulativeTokens: Long = 0L
+    val cumulativeTokens: Long = 0L,
+    /** Skill 系统：当前会话选中的 skill id（持久化，加载时用于决定 system prompt）。 */
+    val currentSkillId: String? = null
 )
 
 data class UsageSnapshot(

@@ -12,7 +12,7 @@ data class AppSettings(
     val temperature: Float = 0.2f,
     val topP: Float = 0.95f,
     val maxTokens: Int = 4096,
-    val reasoningEffort: ReasoningEffort = ReasoningEffort.MEDIUM,
+    val reasoningEffort: ReasoningEffort = ReasoningEffort.HIGH,
     val thinkingEnabled: Boolean = true,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     val editorFontSizeSp: Float = 14f,
@@ -33,11 +33,11 @@ data class AppSettings(
     }
 
     enum class ReasoningEffort(val value: String) {
-        LOW("low"), MEDIUM("medium"), HIGH("high"), DISABLED("");
+        HIGH("high"), MAX("max"), DISABLED("");
 
         fun enabled() = this != DISABLED
         companion object {
-            fun fromValue(v: String?): ReasoningEffort = entries.firstOrNull { it.value == v } ?: MEDIUM
+            fun fromValue(v: String?): ReasoningEffort = entries.firstOrNull { it.value == v } ?: HIGH
         }
     }
 

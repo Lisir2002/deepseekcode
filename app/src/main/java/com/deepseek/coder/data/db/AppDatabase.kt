@@ -11,7 +11,7 @@ import com.deepseek.coder.data.db.entity.ChatSessionEntity
         ChatSessionEntity::class,
         ChatMessageEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

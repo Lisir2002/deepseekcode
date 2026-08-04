@@ -44,20 +44,28 @@ data class ChatMessageDto(
 data class ChatCompletionRequest(
     val model: String,
     val messages: List<ChatMessageDto>,
-    val frequency_penalty: Float? = null,
-    val presence_penalty: Float? = null,
     val max_tokens: Int? = null,
     val temperature: Float? = null,
     val top_p: Float? = null,
     @SerialName("response_format") val responseFormat: ResponseFormatDto? = null,
     val stream: Boolean = false,
     @SerialName("stream_options") val streamOptions: StreamOptionsDto? = null,
-    @SerialName("thinking_budget") val thinkingBudget: Int? = null,
+    /** 思考模式开关，{"type":"enabled"} 或 {"type":"disabled"}。默认 enabled（DeepSeek 官方）。 */
+    val thinking: ThinkingDto? = null,
     @SerialName("reasoning_effort") val reasoningEffort: String? = null,
     val tools: List<ToolDto>? = null,
     val seed: Long? = null,
     val stop: List<String>? = null
 )
+
+/**
+ * 思考模式开关 DTO（DeepSeek V4 官方文档）。
+ * - type="enabled"：开启思考模式，模型先输出 reasoning_content 再输出 content
+ * - type="disabled"：关闭思考模式
+ * OpenAI SDK 需通过 extra_body 传入；直接 HTTP 调用放在 body 顶层即可。
+ */
+@Serializable
+data class ThinkingDto(val type: String)
 
 @Serializable
 data class ResponseFormatDto(
